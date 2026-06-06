@@ -104,6 +104,9 @@ Section "Install" SecInstall
     SetOutPath "$INSTDIR"
 
     File "${FILES_DIR}\LICENSE.txt"
+	File "${FILES_DIR}\LICENSE"
+	File "${FILES_DIR}\LICENSE.MIT"
+	File "${FILES_DIR}\manifest.vrmanifest"
     File "${FILES_DIR}\OpenVR-SpaceCalibrator.exe"
     File "${FILES_DIR}\openvr_api.dll"
     File "${FILES_DIR}\icon.png"
@@ -121,6 +124,10 @@ Section "Install" SecInstall
 
     ExecWait '"C:\\Program Files (x86)\\Steam\\steamapps\\common\\SteamVR\\bin\\win64\\vrpathreg.exe" adddriver "$INSTDIR\\driver"'
 
+	SetOutPath "$INSTDIR"
+	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceCalibrator.exe" -installmanifest'
+	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceCalibrator.exe" -activatemultipledrivers'
+
 SectionEnd
 
 ;--------------------------------
@@ -128,7 +135,13 @@ SectionEnd
 
 Section "Uninstall"
 
+	SetOutPath "$INSTDIR"
+	nsExec::ExecToLog '"$INSTDIR\OpenVR-SpaceCalibrator.exe" -removemanifest'
+
     Delete "$INSTDIR\LICENSE.txt"
+	Delete "$INSTDIR\LICENSE"
+	Delete "$INSTDIR\LICENSE.MIT"
+	Delete "$INSTDIR\manifest.vrmanifest"
     Delete "$INSTDIR\OpenVR-SpaceCalibrator.exe"
     Delete "$INSTDIR\openvr_api.dll"
     Delete "$INSTDIR\icon.png"

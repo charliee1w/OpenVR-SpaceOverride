@@ -1,0 +1,16 @@
+{
+	"source" : "builtin",
+	"applications": [{
+		"app_key": "Nyabsi.SpaceCalibratorEx",
+		"launch_type": "binary",
+		"binary_path_windows": "OpenVR-SpaceCalibrator.exe",
+		"is_dashboard_overlay": true,
+
+		"strings": {
+			"en_us": {
+				"name": "Space Calibrator Ex",
+				"description": "OpenVR Space Calibrator Overlay"
+			}
+		}
+	}]
+}
