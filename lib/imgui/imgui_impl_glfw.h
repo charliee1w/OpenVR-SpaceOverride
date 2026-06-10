@@ -67,5 +67,6 @@ IMGUI_IMPL_API void     ImGui_ImplGlfw_Sleep(int milliseconds);
 IMGUI_IMPL_API float    ImGui_ImplGlfw_GetContentScaleForWindow(GLFWwindow* window);
 IMGUI_IMPL_API float    ImGui_ImplGlfw_GetContentScaleForMonitor(GLFWmonitor* monitor);
 
+IMGUI_IMPL_API void		ImGui_ImplGlfw_SetReadMouseFromGlfw(bool enabled);
 
 #endif // #ifndef IMGUI_DISABLE

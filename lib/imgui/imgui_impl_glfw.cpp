@@ -234,6 +234,8 @@ struct ImGui_ImplGlfw_Data
     ImGui_ImplGlfw_Data()   { memset((void*)this, 0, sizeof(*this)); }
 };
 
+static bool             g_EnableMouseInput = true;
+
 // Backend data stored in io.BackendPlatformUserData to allow support for multiple Dear ImGui contexts
 // It is STRONGLY preferred that you use docking branch with multi-viewports (== single Dear ImGui context + multiple windows) instead of multiple Dear ImGui contexts.
 // FIXME: multi-context support is not well tested and probably dysfunctional in this backend.
@@ -667,6 +669,11 @@ EM_JS(void, ImGui_ImplGlfw_EmscriptenOpenURL, (const char* url), { url = url ? U
 #endif
 #endif
 
+void ImGui_ImplGlfw_SetReadMouseFromGlfw(bool enabled)
+{
+    g_EnableMouseInput = enabled;
+}
+
 static bool ImGui_ImplGlfw_Init(GLFWwindow* window, bool install_callbacks, GlfwClientApi client_api)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -827,6 +834,9 @@ void ImGui_ImplGlfw_Shutdown()
 
 static void ImGui_ImplGlfw_UpdateMouseData()
 {
+    if (!g_EnableMouseInput)
+        return;
+
     ImGui_ImplGlfw_Data* bd = ImGui_ImplGlfw_GetBackendData();
     ImGuiIO& io = ImGui::GetIO();
 

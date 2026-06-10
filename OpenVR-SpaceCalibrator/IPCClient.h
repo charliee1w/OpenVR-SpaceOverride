@@ -14,5 +14,7 @@ public:
 	protocol::Response Receive();
 
 private:
+	void ConnectInternal();
+
 	HANDLE pipe = INVALID_HANDLE_VALUE;
 };

@@ -44,6 +44,7 @@ struct CalibrationContext
 	bool enableNative = false;
 	bool fallbackToSlam = true;
 	bool disableAngularVelocity = false;
+	float predictionTime = 1.0f;
 
 	enum Speed
 	{

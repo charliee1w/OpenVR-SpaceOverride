@@ -96,7 +96,6 @@
     <ClInclude Include="Logging.h" />
     <ClInclude Include="OpenVR-SpaceCalibratorDriver.h" />
     <ClInclude Include="ServerTrackedDeviceProvider.h" />
-    <ClInclude Include="VRWatchdogProvider.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">

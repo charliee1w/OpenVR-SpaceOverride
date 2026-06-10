@@ -24,9 +24,6 @@
     <ClInclude Include="ServerTrackedDeviceProvider.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="VRWatchdogProvider.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="IPCServer.h">
       <Filter>Header Files</Filter>
     </ClInclude>

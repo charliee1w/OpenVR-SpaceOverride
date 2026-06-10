@@ -87,6 +87,7 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker &c
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
 	hmdTracker.disableAngVel = cmd.disableAngVel;
+	hmdTracker.predictionTime = cmd.predictionTime;
 	hmdTracker.hmdID = cmd.hmdID;
 	hmdTracker.trackerID = cmd.trackerID;
 	hmdTracker.offsetRotation = cmd.offsetRotation;
@@ -119,7 +120,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
 
 			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses(1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float), poses, vr::k_unMaxTrackedDeviceCount);
+			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
 
 			const auto& tp = poses[hmdTracker.trackerID];
 			if (tp.bPoseIsValid)

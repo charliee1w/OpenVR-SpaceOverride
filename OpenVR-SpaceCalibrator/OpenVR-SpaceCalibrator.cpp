@@ -36,7 +36,7 @@ void CreateConsole()
 	}
 }
 
-#define DEBUG_LOGS
+//#define DEBUG_LOGS
 
 void GLFWErrorCallback(int error, const char* description)
 {
@@ -235,12 +235,13 @@ void RunLoop()
 			}
 		}
 
-		ImGui::GetIO().DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
 
-		// ImGui_ImplGlfw_SetReadMouseFromGlfw(!dashboardVisible);
+		ImGui_ImplGlfw_SetReadMouseFromGlfw(!dashboardVisible);
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
 		ImGui_ImplOpenVR_NewFrame();
+
+		ImGui::GetIO().DisplaySize = ImVec2((float)fboTextureWidth, (float)fboTextureHeight);
 		ImGui::NewFrame();
 
 		BuildMainWindow(dashboardVisible);

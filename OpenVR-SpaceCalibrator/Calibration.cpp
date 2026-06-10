@@ -355,6 +355,7 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.enabled = enabled;
 	req.setHmdTracker.native = CalCtx.enableNative;
 	req.setHmdTracker.slamFallback = CalCtx.fallbackToSlam;
+	req.setHmdTracker.predictionTime = CalCtx.predictionTime;
 	req.setHmdTracker.disableAngVel = CalCtx.disableAngularVelocity;
 	req.setHmdTracker.offsetRotation = CalCtx.relativeRotation;
 	req.setHmdTracker.offsetTranslation = CalCtx.relativeTranslation;

@@ -35,7 +35,9 @@ void BuildMenu(bool runningInOverlay);
 static const ImGuiWindowFlags bareWindowFlags =
 	ImGuiWindowFlags_NoTitleBar |
 	ImGuiWindowFlags_NoResize |
-	ImGuiWindowFlags_NoMove;
+	ImGuiWindowFlags_NoMove |
+	ImGuiWindowFlags_NoScrollbar |
+	ImGuiWindowFlags_NoScrollWithMouse;
 
 void BuildMainWindow(bool runningInOverlay)
 {
@@ -52,9 +54,48 @@ void BuildMainWindow(bool runningInOverlay)
 
 	ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImGui::GetStyleColorVec4(ImGuiCol_Button));
 
-	auto state = LoadVRState();
-	BuildStatus(state);
-	BuildMenu(runningInOverlay);
+	if (ImGui::BeginTabBar("##tabs")) {
+
+		if (ImGui::BeginTabItem("Calibration")) {
+
+			auto state = LoadVRState();
+			BuildStatus(state);
+			BuildMenu(runningInOverlay);
+			ImGui::EndTabItem();
+		}
+
+		if (ImGui::BeginTabItem("Settings")) {
+			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
+
+			ImGui::Checkbox("Native Override (Only For Expert Users)", &CalCtx.enableNative);
+			ImGui::SetItemTooltip(
+				"Discards all SLAM tracking (even as fallback) and feeds only raw tracker data with the offset applied.\n"
+				"Downside: a yaw orientation mismatch may occur. This only works in Local tracking space, where\n"
+				"re-centering adjusts the yaw - Stage tracking space never re-centers yaw, so the mismatch cannot\n"
+				"be corrected there.\n"
+				"Will not work on all devices - tested only on Pico.");
+
+			ImGui::Checkbox("Fallback to SLAM", &CalCtx.fallbackToSlam);
+			ImGui::SetItemTooltip(
+				"Temporarily uses HMD (SLAM) tracking if the headset tracker loses line of sight.");
+
+			ImGui::Checkbox("Disable Angular Velocity", &CalCtx.disableAngularVelocity);
+			ImGui::SetItemTooltip(
+				"Disables angular velocity reporting, as it may cause issues with some devices.");
+
+			ImGui::Text("Prediction Time");
+			ImGui::SameLine();
+			ImGui::SliderFloat("##prediction_time", &CalCtx.predictionTime, 0.0f, 10.0f, "%.1f");
+
+			ImGui::SetItemTooltip(
+				"How many frames of prediction SteamVR applies to the tracker.\n"
+				"Some wireless solutions may need more prediction to feel smooth.");
+			ImGui::EndTabItem();
+		}
+
+
+		ImGui::EndTabBar();
+	}
 
 	ImGui::PopStyleColor();
 	ImGui::End();
@@ -68,14 +109,11 @@ void BuildMenu(bool runningInOverlay)
 
 	if (CalCtx.state == CalibrationState::None)
 	{
-		float width = ImGui::GetContentRegionAvail().x, scale = 1.0f;
+		float buttonWidth = ImGui::GetContentRegionAvail().x;
 		if (CalCtx.validProfile)
-		{
-			width -= style.FramePadding.x * 4.0f;
-			scale = 1.0f / 3.0f;
-		}
+			buttonWidth = (buttonWidth - style.ItemSpacing.x * 2.0f) / 3.0f;
 
-		if (ImGui::Button("Calibrate", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
+		if (ImGui::Button("Calibrate", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 		{
 			ImGui::OpenPopup("Calibration Progress");
 			StartCalibration();
@@ -84,35 +122,25 @@ void BuildMenu(bool runningInOverlay)
 		if (CalCtx.validProfile)
 		{
 			ImGui::SameLine();
-			if (ImGui::Button("Edit Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
+			if (ImGui::Button("Edit Calibration", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 			{
 				CalCtx.state = CalibrationState::Editing;
 			}
 
 			ImGui::SameLine();
-			if (ImGui::Button("Remove Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
+			if (ImGui::Button("Remove Calibration", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 			{
 				CalCtx.Clear();
 				SaveProfile(CalCtx);
 			}
 		}
 
-		ImGui::Checkbox("Disable HMD Alignment", &CalCtx.enableNative);
-		ImGui::SameLine();
-		ImGui::Checkbox("Fallback to SLAM", &CalCtx.fallbackToSlam);
-		ImGui::SameLine();
-		ImGui::Checkbox("Disable Angular Velocity", &CalCtx.disableAngularVelocity);
-
-		width = ImGui::GetContentRegionAvail().x;
-		scale = 1.0f;
+		float chapWidth = ImGui::GetContentRegionAvail().x;
 		if (CalCtx.chaperone.valid)
-		{
-			width -= style.FramePadding.x * 2.0f;
-			scale = 0.5;
-		}
+			chapWidth = (chapWidth - style.ItemSpacing.x) / 2.0f;
 
 		ImGui::Text("");
-		if (ImGui::Button("Copy Chaperone Bounds to profile", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
+		if (ImGui::Button("Copy Chaperone Bounds to profile", ImVec2(chapWidth, ImGui::GetTextLineHeight() * 2)))
 		{
 			LoadChaperoneBounds();
 			SaveProfile(CalCtx);
@@ -121,7 +149,7 @@ void BuildMenu(bool runningInOverlay)
 		if (CalCtx.chaperone.valid)
 		{
 			ImGui::SameLine();
-			if (ImGui::Button("Paste Chaperone Bounds", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
+			if (ImGui::Button("Paste Chaperone Bounds", ImVec2(chapWidth, ImGui::GetTextLineHeight() * 2)))
 			{
 				ApplyChaperoneBounds();
 			}
@@ -167,8 +195,10 @@ void BuildMenu(bool runningInOverlay)
 		ImGui::Button("Calibration in progress...", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2));
 	}
 
-	ImGui::SetNextWindowPos(ImVec2(10.0f, ImGui::GetWindowHeight() - ImGui::GetFrameHeightWithSpacing()));
-	ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, ImGui::GetFrameHeightWithSpacing() * 2), false);
+	float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
+	ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
+	ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false,
+		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 	ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " - by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
 	if (runningInOverlay)
 	{
@@ -202,7 +232,7 @@ void BuildMenu(bool runningInOverlay)
 		if (CalCtx.state == CalibrationState::None)
 		{
 			ImGui::Text("");
-			if (ImGui::Button("Close", ImVec2(ImGui::GetFrameHeightWithSpacing(), ImGui::GetTextLineHeight() * 2)))
+			if (ImGui::Button("Close", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))
 				ImGui::CloseCurrentPopup();
 		}
 
