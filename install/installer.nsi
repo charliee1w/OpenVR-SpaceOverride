@@ -145,7 +145,7 @@ Section "Uninstall"
     Delete "$INSTDIR\OpenVR-SpaceOverride.exe"
     Delete "$INSTDIR\openvr_api.dll"
     Delete "$INSTDIR\icon.png"
-    RMDir /r $INSTDIR\driver"
+    RMDir /r "$INSTDIR\driver"
 
     DeleteRegKey HKLM "Software\${APP_NAME}"
     DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
