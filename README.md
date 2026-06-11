@@ -74,6 +74,10 @@ This can cause SLAM devices to drift, and this is *by design*, so please re-cali
 
 This is expected, see [Compatibility](#compatibility). Steam Link seems to apply its own reprojection / pose prediction on-device on top of the overridden pose, and it's stage tracked rather than local space tracked, which breaks yaw correction. For the best experience, use PICO Connect, Virtual Desktop or ALVR.
 
+### The view seems to have odd roll effect
+
+Turn on "Disable Angular Velocity" in the Settings.
+
 ## FAQ
 
 ### How is this different from TrackingOverride?
