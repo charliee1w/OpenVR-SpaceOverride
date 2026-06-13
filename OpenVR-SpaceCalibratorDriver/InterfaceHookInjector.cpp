@@ -13,7 +13,7 @@ static Hook<void(*)(void*, uint32_t, const vr::DriverPose_t &, uint32_t)>
 static Hook<void(*)(void*, uint32_t, const vr::DriverPose_t &, uint32_t)>
 	TrackedDevicePoseUpdatedHook006("IVRServerDriverHost006::TrackedDevicePoseUpdated");
 
-static void DetourTrackedDevicePoseUpdated005(void* *_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
+static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
@@ -25,7 +25,7 @@ static void DetourTrackedDevicePoseUpdated005(void* *_this, uint32_t unWhichDevi
 	}
 }
 
-static void DetourTrackedDevicePoseUpdated006(void**_this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
+static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
@@ -37,7 +37,7 @@ static void DetourTrackedDevicePoseUpdated006(void**_this, uint32_t unWhichDevic
 	}
 }
 
-static void *DetourGetGenericInterface(void*_this, const char *pchInterfaceVersion, vr::EVRInitError *peError)
+static void *DetourGetGenericInterface(void* _this, const char *pchInterfaceVersion, vr::EVRInitError *peError)
 {
 	TRACE("ServerTrackedDeviceProvider::DetourGetGenericInterface(%s)", pchInterfaceVersion);
 	auto originalInterface = GetGenericInterfaceHook.originalFunc(_this, pchInterfaceVersion, peError);
