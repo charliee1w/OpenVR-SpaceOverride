@@ -71,8 +71,6 @@ Re-run the calibration with a **slower calibration speed**. A rushed calibration
 
 You need to re-center your headset tracking while rotating around in a circle until the view matches again, this is a known quirk as of right now.
 
-This can cause SLAM devices to drift, and this is *by design*, so please re-calibrate if that happens. However, note this should never happen during active usage.
-
 ### Steam Link feels off / some features don't work
 
 This is expected, see [Compatibility](#compatibility). Steam Link seems to apply its own reprojection / pose prediction on-device on top of the overridden pose, and it's stage tracked rather than local space tracked, which breaks yaw correction. For the best experience, use PICO Connect, Virtual Desktop or ALVR.
