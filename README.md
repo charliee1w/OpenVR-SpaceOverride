@@ -76,6 +76,10 @@ This is expected, see [Compatibility](#compatibility). Steam Link seems to apply
 
 Turn on "Disable Angular Velocity" in the Settings.
 
+## Being forced to look into one direction
+
+Don't launch OVR Advanced settings and try again.
+
 ## FAQ
 
 ### How is this different from TrackingOverride?
