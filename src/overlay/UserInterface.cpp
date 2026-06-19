@@ -70,6 +70,80 @@ void BuildMainWindow(bool runningInOverlay)
 			ImGui::EndTabItem();
 		}
 
+		if (ImGui::BeginTabItem("Smoothing"))
+		{
+			ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "NOTE: Changes here take effect instantly, no need to re-calibrate.");
+			ImGui::Spacing();
+			ImGui::TextWrapped(
+				"These settings smooth out tracking so your view and devices look steady instead of shaky. "
+				"If something looks shaky, add more smoothing. If it feels laggy or floaty when you move, "
+				"ease off. Not sure? Hover over a slider for tips.");
+			ImGui::Spacing();
+
+			const double cutoffMin = 0.1, cutoffMax = 5.0;
+			const double betaMin = 0.0, betaMax = 2.0;
+
+			auto paramSliders = [&](const char* id, protocol::OneEuroParams& p) {
+				bool c = false;
+				ImGui::PushID(id);
+
+				ImGui::Text("minCutoff");
+				ImGui::SameLine(170);
+				ImGui::SetNextItemWidth(-1);
+				c |= ImGui::SliderScalar("##minCutoff", ImGuiDataType_Double, &p.minCutoff, &cutoffMin, &cutoffMax, "%.3f Hz");
+				ImGui::SetItemTooltip(
+					"How steady things look when you are not moving.\n"
+					"Drag left to remove shaking for a calmer image; drag right if things start to feel laggy or floaty."
+				);
+
+				ImGui::Text("beta");
+				ImGui::SameLine(170);
+				ImGui::SetNextItemWidth(-1);
+				c |= ImGui::SliderScalar("##beta", ImGuiDataType_Double, &p.beta, &betaMin, &betaMax, "%.3f Hz");
+				ImGui::SetItemTooltip(
+					"How quickly tracking keeps up when you move fast.\n"
+					"Drag right if fast movements feel delayed or laggy; drag left if they look shaky."
+				);
+
+				ImGui::Text("dCutoff");
+				ImGui::SameLine(170);
+				ImGui::SetNextItemWidth(-1);
+				c |= ImGui::SliderScalar("##dCutoff", ImGuiDataType_Double, &p.dCutoff, &cutoffMin, &cutoffMax, "%.3f Hz");
+				ImGui::SetItemTooltip(
+					"Most people can leave this alone.\n"
+					"It fine-tunes how the smoothing reacts as your movement speed changes."
+				);
+
+				ImGui::PopID();
+				return c;
+			};
+
+			bool changed = false;
+
+			changed |= ImGui::Checkbox("Smooth headset tracker", &CalCtx.headFilterEnabled);
+			ImGui::SetItemTooltip("Steadies what you see through the headset to reduce shaking. This can add a tiny bit of delay, so if your view feels laggy when you move quickly, adjust the sliders below.");
+
+			ImGui::Spacing();
+			ImGui::SeparatorText("Headset Tracker");
+			ImGui::BeginDisabled(!CalCtx.headFilterEnabled);
+			changed |= paramSliders("head", CalCtx.headFilterParams);
+			ImGui::EndDisabled();
+
+			ImGui::Spacing();
+			ImGui::SeparatorText("Relative Calibration");
+			ImGui::TextWrapped(
+				"Keeps your controllers and other tracked devices lined up with your real space, and "
+				"steadies your view if the headset briefly loses tracking. Add more smoothing if they "
+				"look shaky; ease off if they are slow to line up.");
+			ImGui::Spacing();
+			changed |= paramSliders("drift", CalCtx.driftFilterParams);
+
+			if (changed)
+				SendOneEuroParams();
+
+			ImGui::EndTabItem();
+		}
+
 		if (ImGui::BeginTabItem("Settings"))
 		{
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
@@ -137,7 +211,6 @@ void BuildMainWindow(bool runningInOverlay)
 
 			ImGui::EndTabItem();
 		}
-
 
 		ImGui::EndTabBar();
 	}

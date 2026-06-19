@@ -3,9 +3,9 @@
 #pragma once
 
 #include "IPCServer.h"
+#include "OneEuroFilter.h"
 
 #include <openvr_driver.h>
-#include <chrono>
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
@@ -41,6 +41,7 @@ public:
 	void SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
 	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
 	void SetSlamSync(const protocol::SetSlamSync &cmd);
+	void SetOneEuro(const protocol::SetOneEuro &cmd);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
@@ -79,12 +80,23 @@ private:
 
 	struct DriftCorrection
 	{
-		enum Level { TINY = 0, SMALL = 1, LARGE = 2 };
-
 		bool valid = false;
-		int level = TINY;
 		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
 		vr::HmdVector3d_t translation = { 0, 0, 0 };
+
 		LARGE_INTEGER lastUpdate = {};
+		oneeuro::Quat rotationFilter;
+		oneeuro::Vec3 translationFilter;
 	} drift;
+
+	struct HeadFilter
+	{
+		bool enabled = false;
+		bool valid = false;
+		LARGE_INTEGER lastUpdate = {};
+		oneeuro::Quat rotationFilter;
+		oneeuro::Vec3 translationFilter;
+
+		void reset() { valid = false; rotationFilter.reset(); translationFilter.reset(); }
+	} headFilter;
 };

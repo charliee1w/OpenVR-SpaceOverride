@@ -80,6 +80,20 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.predictionTime = 1.0;
 
+	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams &out, protocol::OneEuroParams def) {
+		out = def;
+		if (!obj[key].is<picojson::object>())
+			return;
+		auto o = obj[key].get<picojson::object>();
+		if (o["minCutoff"].is<double>()) out.minCutoff = o["minCutoff"].get<double>();
+		if (o["beta"].is<double>())      out.beta = o["beta"].get<double>();
+		if (o["dCutoff"].is<double>())   out.dCutoff = o["dCutoff"].get<double>();
+	};
+
+	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : true;
+	loadOneEuro("headFilter", ctx.headFilterParams, { 2.0, 0.5, 1.0 });
+	loadOneEuro("driftFilter", ctx.driftFilterParams, { 1.0, 0.4, 0.85 });
+
 	if (obj["rel_qw"].is<double>())
 	{
 		ctx.relativeRotation.w = obj["rel_qw"].get<double>();
@@ -153,6 +167,18 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 
 	double time = ctx.predictionTime;
 	profile["predictionTime"].set<double>(time);
+
+	profile["headFilterEnabled"].set<bool>(ctx.headFilterEnabled);
+
+	auto saveOneEuro = [](const protocol::OneEuroParams &p) {
+		picojson::object o;
+		o["minCutoff"].set<double>(p.minCutoff);
+		o["beta"].set<double>(p.beta);
+		o["dCutoff"].set<double>(p.dCutoff);
+		return o;
+	};
+	profile["headFilter"].set<picojson::object>(saveOneEuro(ctx.headFilterParams));
+	profile["driftFilter"].set<picojson::object>(saveOneEuro(ctx.driftFilterParams));
 
 	if (ctx.validRelativeOffset)
 	{

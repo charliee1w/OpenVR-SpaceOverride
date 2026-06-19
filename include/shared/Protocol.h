@@ -8,11 +8,11 @@
 #include <openvr_driver.h>
 #endif
 
-#define OPENVR_SPACECALIBRATOR_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceCalibratorDriverEx"
+#define OPENVR_SPACECALIBRATOR_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceOverrideCom"
 
 namespace protocol
 {
-	const uint32_t Version = 4;
+	const uint32_t Version = 5;
 
 	enum RequestType
 	{
@@ -21,6 +21,7 @@ namespace protocol
 		RequestSetDeviceTransform,
 		RequestSetHmdTracker,
 		RequestSetSlamSync,
+		RequestSetOneEuro,
 	};
 
 	enum ResponseType
@@ -80,12 +81,24 @@ namespace protocol
 		vr::HmdVector3d_t calibrationTranslation;
 	};
 
-	// Marks a device as living in the HMD's (SLAM) tracking space, so the driver
-	// continuously re-aligns it to the calibrated space as the SLAM tracking drifts.
 	struct SetSlamSync
 	{
 		uint32_t openVRID;
 		bool enabled;
+	};
+
+	struct OneEuroParams
+	{
+		double minCutoff;
+		double beta;
+		double dCutoff;
+	};
+
+	struct SetOneEuro
+	{
+		bool headEnabled;
+		OneEuroParams head;
+		OneEuroParams drift;
 	};
 
 	struct Request
@@ -96,6 +109,7 @@ namespace protocol
 			SetDeviceTransform setDeviceTransform;
 			SetHmdTracker setHmdTracker;
 			SetSlamSync setSlamSync;
+			SetOneEuro setOneEuro;
 		};
 
 		Request() : type(RequestInvalid) { }

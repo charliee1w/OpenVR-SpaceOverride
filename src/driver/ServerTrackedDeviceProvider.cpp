@@ -36,45 +36,11 @@ inline vr::HmdQuaternion_t quaternionConjugate(const vr::HmdQuaternion_t& q) {
 	return { q.w, -q.x, -q.y, -q.z };
 }
 
-inline double quaternionAngleBetween(const vr::HmdQuaternion_t& a, const vr::HmdQuaternion_t& b) {
-	double dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
-	dot = fabs(dot);
-	if (dot > 1.0) dot = 1.0;
-	return 2.0 * acos(dot);
-}
-
 inline vr::HmdQuaternion_t quaternionProjectYaw(const vr::HmdQuaternion_t& q) {
 	double n = std::sqrt(q.w * q.w + q.y * q.y);
 	if (n < 1e-9)
-		return { 1, 0, 0, 0 }; // 180 deg tilt
+		return { 1, 0, 0, 0 };
 	return { q.w / n, 0.0, q.y / n, 0.0 };
-}
-
-inline vr::HmdQuaternion_t quaternionSlerp(const vr::HmdQuaternion_t& a, vr::HmdQuaternion_t b, double t) {
-	double dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
-	if (dot < 0.0) {
-		dot = -dot;
-		b.w = -b.w; b.x = -b.x; b.y = -b.y; b.z = -b.z;
-	}
-
-	double wa, wb;
-	if (dot > 0.9995) {
-		wa = 1.0 - t;
-		wb = t;
-	}
-	else {
-		double theta = acos(dot);
-		double s = sin(theta);
-		wa = sin((1.0 - t) * theta) / s;
-		wb = sin(t * theta) / s;
-	}
-
-	return quaternionNormalize({
-		wa * a.w + wb * b.w,
-		wa * a.x + wb * b.x,
-		wa * a.y + wb * b.y,
-		wa * a.z + wb * b.z
-		});
 }
 
 template < class T >
@@ -94,6 +60,19 @@ inline vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 	return q;
 }
 
+static double FilterStep(LARGE_INTEGER& lastUpdate, bool primed)
+{
+	LARGE_INTEGER now, freq;
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+
+	double dt = primed ? (now.QuadPart - lastUpdate.QuadPart) / (double)freq.QuadPart : 0.0;
+	lastUpdate = now;
+	if (dt <= 0.0 || isnan(dt)) dt = 1.0 / 90.0;
+	if (dt > 0.1) dt = 0.1;
+	return dt;
+}
+
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriverContext)
 {
 	TRACE("ServerTrackedDeviceProvider::Init()");
@@ -104,6 +83,12 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof DeviceTransform);
 	memset(slamSync, 0, sizeof slamSync);
+
+
+	drift.rotationFilter.params = { 1.0, 0.4, 0.85 };
+	drift.translationFilter.params = { 1.0, 0.4, 0.85 };
+	headFilter.rotationFilter.params = { 2.0, 0.5, 1.0 };
+	headFilter.translationFilter.params = { 2.0, 0.5, 1.0 };
 
 	InjectHooks(pDriverContext);
 	server.Run();
@@ -154,7 +139,9 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	if (!cmd.enabled)
 	{
 		drift.valid = false;
-		drift.level = DriftCorrection::TINY;
+		drift.rotationFilter.reset();
+		drift.translationFilter.reset();
+		headFilter.reset();
 		memset(slamSync, 0, sizeof slamSync);
 	}
 }
@@ -163,6 +150,26 @@ void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 {
 	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount)
 		slamSync[cmd.openVRID] = cmd.enabled;
+}
+
+void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
+{
+	auto toParams = [](const protocol::OneEuroParams& p) {
+		oneeuro::Params out;
+		out.minCutoff = p.minCutoff < 0.01 ? 0.01 : p.minCutoff;
+		out.beta = p.beta < 0.0 ? 0.0 : p.beta;
+		out.dCutoff = p.dCutoff < 0.01 ? 0.01 : p.dCutoff;
+		return out;
+	};
+
+	headFilter.rotationFilter.params = toParams(cmd.head);
+	headFilter.translationFilter.params = toParams(cmd.head);
+	drift.rotationFilter.params = toParams(cmd.drift);
+	drift.translationFilter.params = toParams(cmd.drift);
+
+	if (headFilter.enabled && !cmd.headEnabled)
+		headFilter.reset();
+	headFilter.enabled = cmd.headEnabled;
 }
 
 void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
@@ -176,82 +183,11 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 		correctedPosition[2] - instRotatedRaw.v[2]
 	};
 
-	LARGE_INTEGER now, freq;
-	QueryPerformanceCounter(&now);
-	QueryPerformanceFrequency(&freq);
+	double dt = FilterStep(drift.lastUpdate, drift.valid);
 
-	if (!drift.valid)
-	{
-		drift.rotation = instRot;
-		drift.translation = instTrans;
-		drift.level = DriftCorrection::TINY;
-		drift.lastUpdate = now;
-		drift.valid = true;
-		return;
-	}
-
-	double dt = (now.QuadPart - drift.lastUpdate.QuadPart) / (double)freq.QuadPart;
-	drift.lastUpdate = now;
-	if (dt < 0.0) dt = 0.0;
-	if (dt > 0.1) dt = 0.1;
-
-	vr::HmdVector3d_t headCur = quaternionRotateVector(drift.rotation, rawPosition);
-	double dx = headCur.v[0] + drift.translation.v[0] - correctedPosition[0];
-	double dy = headCur.v[1] + drift.translation.v[1] - correctedPosition[1];
-	double dz = headCur.v[2] + drift.translation.v[2] - correctedPosition[2];
-	double transDelta = sqrt(dx * dx + dy * dy + dz * dz);
-	double rotDelta = quaternionAngleBetween(drift.rotation, instRot);
-
-	const double deg = 3.14159265358979323846 / 180.0;
-
-	if (transDelta > 0.5 || rotDelta > 30.0 * deg)
-	{
-		drift.rotation = instRot;
-		drift.translation = instTrans;
-		drift.level = DriftCorrection::TINY;
-		return;
-	}
-
-	int level;
-	if (transDelta > 0.10 || rotDelta > 5.0 * deg)
-		level = DriftCorrection::LARGE;
-	else if (transDelta > 0.015 || rotDelta > 1.0 * deg)
-		level = DriftCorrection::SMALL;
-	else
-		level = DriftCorrection::TINY;
-
-	if (transDelta < 0.005 && rotDelta < 0.3 * deg)
-		drift.level = DriftCorrection::TINY;
-	else if (level > drift.level)
-		drift.level = level;
-
-	double rate;
-	switch (drift.level)
-	{
-	case DriftCorrection::LARGE:
-		rate = 2.0; break;
-	case DriftCorrection::SMALL:
-		rate = 0.4; break;
-	default:
-		rate = 0.05;
-		break;
-	}
-
-	double alpha = dt * rate;
-	if (alpha > 1.0)
-		alpha = 1.0;
-	if (alpha < 0.0 || isnan(alpha))
-		alpha = 0.0;
-
-	vr::HmdQuaternion_t newRot = quaternionSlerp(drift.rotation, instRot, alpha);
-
-	double fx = (headCur.v[0] + drift.translation.v[0]) * (1.0 - alpha) + correctedPosition[0] * alpha;
-	double fy = (headCur.v[1] + drift.translation.v[1]) * (1.0 - alpha) + correctedPosition[1] * alpha;
-	double fz = (headCur.v[2] + drift.translation.v[2]) * (1.0 - alpha) + correctedPosition[2] * alpha;
-
-	vr::HmdVector3d_t headNew = quaternionRotateVector(newRot, rawPosition);
-	drift.rotation = newRot;
-	drift.translation = { fx - headNew.v[0], fy - headNew.v[1], fz - headNew.v[2] };
+	drift.rotation = drift.rotationFilter.filter(instRot, dt);
+	drift.translation = drift.translationFilter.filter(instTrans, dt);
+	drift.valid = true;
 }
 
 void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
@@ -352,6 +288,20 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.vecPosition[0] = trackerRefPosition.v[0] + offset.v[0];
 					pose.vecPosition[1] = trackerRefPosition.v[1] + offset.v[1];
 					pose.vecPosition[2] = trackerRefPosition.v[2] + offset.v[2];
+				}
+
+				if (headFilter.enabled)
+				{
+					double dt = FilterStep(headFilter.lastUpdate, headFilter.valid);
+					headFilter.valid = true;
+
+					pose.qRotation = headFilter.rotationFilter.filter(pose.qRotation, dt);
+
+					vr::HmdVector3d_t headPos = headFilter.translationFilter.filter(
+						{ pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2] }, dt);
+					pose.vecPosition[0] = headPos.v[0];
+					pose.vecPosition[1] = headPos.v[1];
+					pose.vecPosition[2] = headPos.v[2];
 				}
 
 				double trackerVel[3] = {

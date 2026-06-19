@@ -412,6 +412,23 @@ void ResetAndDisableOffsets(uint32_t id)
 	Driver.SendBlocking(req);
 }
 
+void SendOneEuroParams()
+{
+	protocol::Request req(protocol::RequestSetOneEuro);
+	req.setOneEuro.headEnabled = CalCtx.headFilterEnabled;
+	req.setOneEuro.head = CalCtx.headFilterParams;
+	req.setOneEuro.drift = CalCtx.driftFilterParams;
+
+	try
+	{
+		Driver.SendBlocking(req);
+	}
+	catch (const std::runtime_error &e)
+	{
+		std::cerr << "Failed to send One Euro params: " << e.what() << std::endl;
+	}
+}
+
 void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 {
 	protocol::Request req(protocol::RequestSetHmdTracker);
@@ -571,6 +588,8 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	{
 		SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, false);
 	}
+
+	SendOneEuroParams();
 
 	if (ctx.enabled && ctx.chaperone.valid && ctx.chaperone.autoApply)
 	{

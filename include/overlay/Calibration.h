@@ -8,6 +8,8 @@
 #include <string>
 #include <iostream>
 
+#include "Protocol.h"
+
 enum class CalibrationState
 {
 	None,
@@ -45,6 +47,10 @@ struct CalibrationContext
 	bool enableAngularVelocity = false;
 	bool continuousSync = true;
 	float predictionTime = 1.0f;
+
+	bool headFilterEnabled = true;
+	protocol::OneEuroParams headFilterParams = { 2.0, 0.5, 1.0 };
+	protocol::OneEuroParams driftFilterParams = { 1.0, 0.4, 0.85 };
 
 	vr::VRNotificationId notificationId = 0;
 
@@ -144,3 +150,4 @@ void CalibrationTick(double time);
 void StartCalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
+void SendOneEuroParams();
