@@ -274,7 +274,6 @@ int main(int argc, char** argv)
                 case vr::VREvent_RestartRequested:
                 {
                     CalCtx.Clear();
-                    SaveProfile(CalCtx);
                     vr::VRSystem()->AcknowledgeQuit_Exiting();
                     g_ticking = false;
                     break;
