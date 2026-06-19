@@ -226,6 +226,8 @@ int main(int argc, char** argv)
                 g_imGuiWindow->SetMinimizedFromEvent(false);
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(g_imGuiWindow->Window()))
                 g_imGuiWindow->Hide();
+            if (event.type == SDL_EVENT_QUIT)
+                g_ticking = false;
         }
 
         while (vr::VROverlay()->PollNextOverlayEvent(g_overlay->Handle(), &vr_event, sizeof(vr_event)))
