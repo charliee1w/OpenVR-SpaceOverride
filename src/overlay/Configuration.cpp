@@ -68,7 +68,7 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	ctx.enableNative = obj["native"].get<bool>();
 	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
-	ctx.disableAngularVelocity = obj["eAngVel"].get<bool>();
+	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
 
 	if (obj["continuousSync"].is<bool>())
 		ctx.continuousSync = obj["continuousSync"].get<bool>();
@@ -148,7 +148,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 
 	profile["native"].set<bool>(ctx.enableNative);
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
-	profile["eAngVel"].set<bool>(ctx.disableAngularVelocity);
+	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);
 	profile["continuousSync"].set<bool>(ctx.continuousSync);
 
 	double time = ctx.predictionTime;

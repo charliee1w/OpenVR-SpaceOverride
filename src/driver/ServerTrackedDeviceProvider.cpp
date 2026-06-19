@@ -142,7 +142,7 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
-	hmdTracker.disableAngVel = cmd.disableAngVel;
+	hmdTracker.enableAngularVelocity = cmd.enableAngularVelocity;
 	hmdTracker.predictionTime = cmd.predictionTime;
 	hmdTracker.hmdID = cmd.hmdID;
 	hmdTracker.trackerID = cmd.trackerID;
@@ -378,9 +378,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 					for (int i = 0; i < 3; i++)
 					{
-						pose.vecVelocity[i] = trackerVel[i] + tangential.v[i];
-						if (!hmdTracker.disableAngVel)
-							pose.vecAngularVelocity[i] = trackerAngVel[i];
+						pose.vecVelocity[i] = trackerVel[i];
+						if (hmdTracker.enableAngularVelocity)
+							pose.vecAngularVelocity[i] = trackerAngVel[i] + tangential.v[i];
 					}
 				}
 				else {
@@ -392,9 +392,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 					for (int i = 0; i < 3; i++)
 					{
-						pose.vecVelocity[i] = vel.v[i] + tangential.v[i];
-						if (!hmdTracker.disableAngVel)
-							pose.vecAngularVelocity[i] = angVel.v[i];
+						pose.vecVelocity[i] = vel.v[i];
+						if (hmdTracker.enableAngularVelocity)
+							pose.vecAngularVelocity[i] = angVel.v[i] + tangential.v[i];
 					}
 				}
 

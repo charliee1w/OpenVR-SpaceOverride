@@ -42,7 +42,7 @@ struct CalibrationContext
 
 	bool enableNative = false;
 	bool fallbackToSlam = true;
-	bool disableAngularVelocity = false;
+	bool enableAngularVelocity = false;
 	bool continuousSync = true;
 	float predictionTime = 1.0f;
 

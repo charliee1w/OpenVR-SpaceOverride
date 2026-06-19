@@ -67,29 +67,21 @@ void BuildMainWindow(bool runningInOverlay)
 
 		if (ImGui::BeginTabItem("Settings")) {
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
-
-			ImGui::Checkbox("Native Override (Only For Expert Users)", &CalCtx.enableNative);
-			ImGui::SetItemTooltip(
-				"Discards all SLAM tracking (even as fallback) and feeds only raw tracker data with the offset applied.\n"
-				"Downside: a yaw orientation mismatch may occur. This only works in Local tracking space, where\n"
-				"re-centering adjusts the yaw - Stage tracking space never re-centers yaw, so the mismatch cannot\n"
-				"be corrected there.\n"
-				"Will not work on all devices - tested only on Pico.");
-
+			ImGui::Text("Tip: hover over the settings to see additional information.");
+			
 			ImGui::Checkbox("Fallback to SLAM", &CalCtx.fallbackToSlam);
 			ImGui::SetItemTooltip(
 				"Temporarily uses HMD (SLAM) tracking if the headset tracker loses line of sight.");
 
-			ImGui::Checkbox("Enable Angular Velocity", &CalCtx.disableAngularVelocity);
+			ImGui::Checkbox("Enable Angular Velocity", &CalCtx.enableAngularVelocity);
 			ImGui::SetItemTooltip(
 				"Enables angular velocity reporting, as it may cause issues with some devices, it is disabled by default.");
 
-			ImGui::Checkbox("Continuous Space Sync", &CalCtx.continuousSync);
+			ImGui::Checkbox("Relative Calibration", &CalCtx.continuousSync);
 			ImGui::SetItemTooltip(
 				"Continuously re-aligns SLAM-tracked devices (controllers etc.) to the calibrated space\n"
 				"in the background. The headset's raw SLAM pose is compared against the tracker-driven\n"
-				"pose to measure SLAM drift, and the correction is applied gradually and automatically.\n"
-				"Only SLAM devices are affected - the HMD and lighthouse devices are never touched.");
+				"pose to measure SLAM drift, and the correction is applied gradually and automatically.");
 
 			ImGui::Text("Prediction Time");
 			ImGui::SameLine();
@@ -98,6 +90,15 @@ void BuildMainWindow(bool runningInOverlay)
 			ImGui::SetItemTooltip(
 				"How many frames of prediction SteamVR applies to the tracker.\n"
 				"Some wireless solutions may need more prediction to feel smooth.");
+
+			// TODO: enable only when launched with --expertsettings
+			ImGui::Checkbox("Native Override (Only For Expert Users)", &CalCtx.enableNative);
+			ImGui::SetItemTooltip(
+				"Discards all SLAM tracking (even as fallback) and feeds only raw tracker data with the offset applied.\n"
+				"Downside: a yaw orientation mismatch may occur. This only works in Local tracking space, where\n"
+				"re-centering adjusts the yaw - Stage tracking space never re-centers yaw, so the mismatch cannot\n"
+				"be corrected there.\n"
+				"Will not work on all devices - tested only on Pico.");
 
 			ImGui::EndTabItem();
 		}

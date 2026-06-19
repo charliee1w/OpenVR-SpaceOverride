@@ -65,7 +65,7 @@ private:
 		bool enabled = false;
 		bool native = false;
 		bool slamFallback = true;
-		bool disableAngVel = false;
+		bool enableAngularVelocity = false;
 		float predictionTime = 1.0f;
 		uint32_t hmdID = vr::k_unTrackedDeviceIndex_Hmd;
 		uint32_t trackerID = vr::k_unTrackedDeviceIndexInvalid;
