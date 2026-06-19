@@ -2,6 +2,10 @@
 
 #include "VulkanRenderer.h"
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #include "VulkanUtils.h"
 
 #include <ranges>
@@ -103,14 +107,13 @@ auto VulkanRenderer::Initialize()  -> void
     vk_result = vkEnumeratePhysicalDevices(vulkan_instance_, &device_count, nullptr);
     VK_VALIDATE_RESULT(vk_result);
 
-    if (device_count < 0)
-        std::exit(EXIT_FAILURE);
+    if (device_count == 0)
+        throw std::runtime_error("You need an GPU to run this program, make sure your drivers are up to date!");
 
     device_list_.resize(device_count);
     vk_result = vkEnumeratePhysicalDevices(vulkan_instance_, &device_count, device_list_.data());
     VK_VALIDATE_RESULT(vk_result);
 
-    // TODO: multi device support
     for (VkPhysicalDevice& device : device_list_)
     {
         VkPhysicalDeviceProperties properties = {};
@@ -125,6 +128,16 @@ auto VulkanRenderer::Initialize()  -> void
             vulkan_physical_device_ = device;
             break;
         }
+    }
+
+    VkPhysicalDeviceProperties vulkan_physical_device_properties = {};
+    vkGetPhysicalDeviceProperties(vulkan_physical_device_, &vulkan_physical_device_properties);
+
+    if (
+        vulkan_physical_device_properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU &&
+        vulkan_physical_device_properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+    {
+        throw std::runtime_error("You need an GPU to run this program, make sure your drivers are up to date!");
     }
 
     VkPhysicalDeviceProperties properties = {};
@@ -178,7 +191,7 @@ auto VulkanRenderer::Initialize()  -> void
         should_enable_dynamic_rendering_ = false;
 
     if (!should_enable_dynamic_rendering_)
-        std::exit(EXIT_FAILURE);
+        throw std::runtime_error("Your graphics card drivers do not support dynamic rendering, upgrade your drivers and make sure your GPU supports it.");
 
     vulkan_device_extensions_.insert(vulkan_device_extensions_.end(), {
         VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
@@ -262,8 +275,7 @@ auto VulkanRenderer::SetupWindow(Vulkan_Window* window, VkSurfaceKHR surface, ui
     VK_VALIDATE_RESULT(vk_result);
 
     if (result != VK_TRUE) {
-        fprintf(stderr, "Error no WSI support on physical device 0\n");
-        exit(-1);
+        throw std::runtime_error("Error no WSI support on physical device 0!");
     }
 
     // request R8G8B8A8 (RGBA, instead of ARGB) format for OpenVR

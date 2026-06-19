@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+#ifdef _WIN32
+#include <Windows.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <direct.h>
@@ -130,7 +134,11 @@ int main(int argc, char** argv)
         ActivateMultipleDrivers();
     }
     catch (std::exception& ex) {
+#ifdef _WIN32
+        MessageBoxA(NULL, ex.what(), APP_NAME, MB_OK);
+#else
         printf("%s\n\n", ex.what());
+#endif
         return EXIT_FAILURE;
     }
 
@@ -140,7 +148,11 @@ int main(int argc, char** argv)
         if (!OpenVRManifestInstalled(APP_KEY)) OpenVRManifestInstall();
     }
     catch (std::exception& ex) {
+#ifdef _WIN32
+        MessageBoxA(NULL, ex.what(), APP_NAME, MB_OK);
+#else
         printf("%s\n\n", ex.what());
+#endif
         return EXIT_FAILURE;
     }
 
@@ -170,16 +182,29 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
-    g_vulkanRenderer->Initialize();
-    g_imGuiWindow->Initialize(g_vulkanRenderer, g_overlay, APP_NAME, WIN_WIDTH, WIN_HEIGHT);
-    g_imGuiWindow->Show();
+    try {
+        g_vulkanRenderer->Initialize();
+        g_imGuiWindow->Initialize(g_vulkanRenderer, g_overlay, APP_NAME, WIN_WIDTH, WIN_HEIGHT);
+        g_imGuiWindow->Show();
+    } catch (std::exception& ex) {
+#ifdef _WIN32
+        MessageBoxA(NULL, ex.what(), APP_NAME, MB_OK);
+#else
+        printf("%s\n\n", ex.what());
+#endif
+        return EXIT_FAILURE;
+    }
 
     try {
         InitCalibrator();
         LoadProfile(CalCtx);
     }
     catch (std::exception& ex) {
+#ifdef _WIN32
+        MessageBoxA(NULL, ex.what(), APP_NAME, MB_OK);
+#else
         printf("%s\n\n", ex.what());
+#endif
         return EXIT_FAILURE;
     }
 

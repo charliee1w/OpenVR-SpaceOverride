@@ -33,7 +33,7 @@ static auto IsVulkanInstanceExtensionAvailable(std::string extension) -> bool
         vkEnumerateInstanceExtensionProperties(nullptr, &extension_properties_count, extension_properties.data());
     }
     else {
-        std::exit(EXIT_FAILURE);
+        throw std::runtime_error("Failed to get list of extensions required by OpenVR");
     }
 
     return IsExtensionAvailable(extension_properties, extension);
@@ -58,7 +58,7 @@ static auto IsVulkanDeviceExtensionAvailable(const VkPhysicalDevice& physical_de
         vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &extension_properties_count, extension_properties.data());
     }
     else {
-        std::exit(EXIT_FAILURE);
+        throw std::runtime_error("Failed to get list of extensions required by OpenVR");
     }
 
     return IsExtensionAvailable(extension_properties, extension);
@@ -86,12 +86,11 @@ static auto GetVulkanInstanceExtensionsRequiredByOpenVR() -> std::vector<std::st
             if (IsVulkanInstanceExtensionAvailable(token)) {
                 result.push_back(token);
             } else {
-                printf("ERROR! %s instance extension asked by OpenVR was NOT available\n", token.c_str());
-                std::exit(EXIT_FAILURE);
+                throw std::runtime_error(std::format("ERROR! {} instance extension asked by OpenVR was NOT available\n", token.c_str()));
             }
         }
     } else {
-        std::exit(EXIT_FAILURE);
+        throw std::runtime_error("Failed to get list of extensions required by OpenVR");
     }
 
     return result;
@@ -117,12 +116,11 @@ static auto GetVulkanDeviceExtensionsRequiredByOpenVR(const VkPhysicalDevice& de
             if (IsVulkanDeviceExtensionAvailable(device, token.data())) {
                 result.push_back(token);
             } else {
-                printf("ERROR! %s device extension asked by OpenVR was NOT available\n", token.c_str());
-                std::exit(EXIT_FAILURE);
+                throw std::runtime_error(std::format("ERROR! {} device extension asked by OpenVR was NOT available\n", token.c_str()));
             }
         }
     } else {
-        std::exit(EXIT_FAILURE);
+        throw std::runtime_error("Failed to get list of extensions required by OpenVR");
     }
 
     return result;

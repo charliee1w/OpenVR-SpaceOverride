@@ -40,6 +40,11 @@ static const ImGuiWindowFlags bareWindowFlags =
 	ImGuiWindowFlags_NoScrollbar |
 	ImGuiWindowFlags_NoScrollWithMouse;
 
+static const ImGuiWindowFlags modalWindowFlags =
+	ImGuiWindowFlags_NoTitleBar |
+	ImGuiWindowFlags_NoResize |
+	ImGuiWindowFlags_NoMove;
+
 void BuildMainWindow(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
@@ -65,10 +70,17 @@ void BuildMainWindow(bool runningInOverlay)
 			ImGui::EndTabItem();
 		}
 
-		if (ImGui::BeginTabItem("Settings")) {
+		if (ImGui::BeginTabItem("Settings"))
+		{
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
+			ImGui::Spacing();
 			ImGui::Text("Tip: hover over the settings to see additional information.");
-			
+			ImGui::Spacing();
+
+			float halfWidth = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+
+			ImGui::BeginChild("##left_panel", ImVec2(halfWidth, 0), true);
+
 			ImGui::Checkbox("Fallback to SLAM", &CalCtx.fallbackToSlam);
 			ImGui::SetItemTooltip(
 				"Temporarily uses HMD (SLAM) tracking if the headset tracker loses line of sight.");
@@ -83,22 +95,45 @@ void BuildMainWindow(bool runningInOverlay)
 				"in the background. The headset's raw SLAM pose is compared against the tracker-driven\n"
 				"pose to measure SLAM drift, and the correction is applied gradually and automatically.");
 
-			ImGui::Text("Prediction Time");
-			ImGui::SameLine();
-			ImGui::SliderFloat("##prediction_time", &CalCtx.predictionTime, 0.0f, 10.0f, "%.1f");
-
-			ImGui::SetItemTooltip(
-				"How many frames of prediction SteamVR applies to the tracker.\n"
-				"Some wireless solutions may need more prediction to feel smooth.");
-
-			// TODO: enable only when launched with --expertsettings
-			ImGui::Checkbox("Native Override (Only For Expert Users)", &CalCtx.enableNative);
+			ImGui::Checkbox("Discard Calibrated Offset", &CalCtx.enableNative);
 			ImGui::SetItemTooltip(
 				"Discards all SLAM tracking (even as fallback) and feeds only raw tracker data with the offset applied.\n"
 				"Downside: a yaw orientation mismatch may occur. This only works in Local tracking space, where\n"
 				"re-centering adjusts the yaw - Stage tracking space never re-centers yaw, so the mismatch cannot\n"
 				"be corrected there.\n"
 				"Will not work on all devices - tested only on Pico.");
+
+			ImGui::EndChild();
+
+			ImGui::SameLine();
+
+			ImGui::BeginChild("##right_panel", ImVec2(0, 0), true);
+
+			ImGui::Text("Prediction Time");
+			ImGui::SameLine();
+			ImGui::SliderFloat("##prediction_time", &CalCtx.predictionTime, 0.0f, 10.0f, "%.1f");
+			ImGui::SetItemTooltip(
+				"How many frames of prediction SteamVR applies to the tracker.\n"
+				"Some wireless solutions may need more prediction to feel smooth.");
+
+			ImGui::Spacing();
+
+			ImGui::Text("Calibration Speed");
+
+			auto speed = CalCtx.calibrationSpeed;
+
+			if (ImGui::RadioButton("Fast", speed == CalibrationContext::FAST))
+				CalCtx.calibrationSpeed = CalibrationContext::FAST;
+
+			if (ImGui::RadioButton("Slow", speed == CalibrationContext::SLOW))
+				CalCtx.calibrationSpeed = CalibrationContext::SLOW;
+
+			if (ImGui::RadioButton("Very Slow", speed == CalibrationContext::VERY_SLOW))
+				CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
+
+			ImGui::SetItemTooltip("Controls how long calibration deltas are collected.");
+
+			ImGui::EndChild();
 
 			ImGui::EndTabItem();
 		}
@@ -145,6 +180,7 @@ void BuildMenu(bool runningInOverlay)
 			}
 		}
 
+		/*
 		float chapWidth = ImGui::GetContentRegionAvail().x;
 		if (CalCtx.chaperone.valid)
 			chapWidth = (chapWidth - style.ItemSpacing.x) / 2.0f;
@@ -171,24 +207,7 @@ void BuildMenu(bool runningInOverlay)
 		}
 
 		ImGui::Text("");
-		auto speed = CalCtx.calibrationSpeed;
-
-		ImGui::Columns(4, NULL, false);
-		ImGui::Text("Calibration Speed");
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Fast          ", speed == CalibrationContext::FAST))
-			CalCtx.calibrationSpeed = CalibrationContext::FAST;
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Slow          ", speed == CalibrationContext::SLOW))
-			CalCtx.calibrationSpeed = CalibrationContext::SLOW;
-
-		ImGui::NextColumn();
-		if (ImGui::RadioButton(" Very Slow     ", speed == CalibrationContext::VERY_SLOW))
-			CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
-
-		ImGui::Columns(1);
+		*/
 	}
 	else if (CalCtx.state == CalibrationState::Editing)
 	{
@@ -207,8 +226,7 @@ void BuildMenu(bool runningInOverlay)
 
 	float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
 	ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
-	ImGui::BeginChild("bottom line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false,
-		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+	ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 	ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " - by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
 	if (runningInOverlay)
 	{
@@ -218,7 +236,7 @@ void BuildMenu(bool runningInOverlay)
 
 	ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f));
 	ImGui::SetNextWindowSize(ImVec2(io.DisplaySize.x - 40.0f, io.DisplaySize.y - 40.0f));
-	if (ImGui::BeginPopupModal("Calibration Progress", nullptr, bareWindowFlags))
+	if (ImGui::BeginPopupModal("Calibration Progress", nullptr, modalWindowFlags))
 	{
 		ImGui::PushStyleColor(ImGuiCol_FrameBg, (ImVec4)ImColor(0, 0, 0));
 		for (auto &message : CalCtx.messages)
