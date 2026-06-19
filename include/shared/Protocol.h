@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+#pragma once
+
+#include <cstdint>
+
+#ifndef _OPENVR_API
+#include <openvr_driver.h>
+#endif
+
+#define OPENVR_SPACECALIBRATOR_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceCalibratorDriverEx"
+
+namespace protocol
+{
+	const uint32_t Version = 4;
+
+	enum RequestType
+	{
+		RequestInvalid,
+		RequestHandshake,
+		RequestSetDeviceTransform,
+		RequestSetHmdTracker,
+		RequestSetSlamSync,
+	};
+
+	enum ResponseType
+	{
+		ResponseInvalid,
+		ResponseHandshake,
+		ResponseSuccess,
+	};
+
+	struct Protocol
+	{
+		uint32_t version = Version;
+	};
+
+	struct SetDeviceTransform
+	{
+		uint32_t openVRID;
+		bool enabled;
+		bool updateTranslation;
+		bool updateRotation;
+		bool updateScale;
+		vr::HmdVector3d_t translation;
+		vr::HmdQuaternion_t rotation;
+		double scale;
+
+		SetDeviceTransform(uint32_t id, bool enabled) :
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false) { }
+
+		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation) :
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(false), updateScale(false), translation(translation) { }
+
+		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdQuaternion_t rotation) :
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(true), updateScale(false), rotation(rotation) { }
+
+		SetDeviceTransform(uint32_t id, bool enabled, double scale) :
+			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(true), scale(scale) { }
+
+		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation) :
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(false), translation(translation), rotation(rotation) { }
+
+		SetDeviceTransform(uint32_t id, bool enabled, vr::HmdVector3d_t translation, vr::HmdQuaternion_t rotation, double scale) :
+			openVRID(id), enabled(enabled), updateTranslation(true), updateRotation(true), updateScale(true), translation(translation), rotation(rotation), scale(scale) { }
+	};
+
+	struct SetHmdTracker
+	{
+		uint32_t hmdID;
+		uint32_t trackerID;
+		bool enabled;
+		bool native;
+		bool slamFallback;
+		bool disableAngVel;
+		float predictionTime;
+		vr::HmdQuaternion_t offsetRotation;
+		vr::HmdVector3d_t offsetTranslation;
+		vr::HmdQuaternion_t calibrationRotation;
+		vr::HmdVector3d_t calibrationTranslation;
+	};
+
+	// Marks a device as living in the HMD's (SLAM) tracking space, so the driver
+	// continuously re-aligns it to the calibrated space as the SLAM tracking drifts.
+	struct SetSlamSync
+	{
+		uint32_t openVRID;
+		bool enabled;
+	};
+
+	struct Request
+	{
+		RequestType type;
+
+		union {
+			SetDeviceTransform setDeviceTransform;
+			SetHmdTracker setHmdTracker;
+			SetSlamSync setSlamSync;
+		};
+
+		Request() : type(RequestInvalid) { }
+		Request(RequestType type) : type(type) { }
+	};
+
+	struct Response
+	{
+		ResponseType type;
+
+		union {
+			Protocol protocol;
+		};
+
+		Response() : type(ResponseInvalid) { }
+		Response(ResponseType type) : type(type) { }
+	};
+}

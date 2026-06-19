@@ -1,0 +1,12 @@
+[submodule "3rdparty/OpenVR"]
+	path = 3rdparty/OpenVR
+	url = https://github.com/valvesoftware/openvr
+[submodule "3rdparty/ImGui"]
+	path = 3rdparty/ImGui
+	url = https://github.com/ocornut/imgui.git
+[submodule "3rdparty/SDL"]
+	path = 3rdparty/SDL
+	url = https://github.com/libsdl-org/SDL.git
+[submodule "3rdparty/MinHook"]
+	path = 3rdparty/MinHook
+	url = https://github.com/TsudaKageyu/minhook.git
