@@ -13,7 +13,7 @@
 !define INSTALL_DIR "$PROGRAMFILES64\${APP_NAME}"
 !define LICENSE_FILE "../bin/LICENSE.txt"
 !define FILES_DIR "../bin/"
-!define DRIVER_DIR "../driver"
+!define DRIVER_DIR "driver"
 
 Name "${APP_NAME}"
 OutFile "${APP_NAME}_Installer.exe"
