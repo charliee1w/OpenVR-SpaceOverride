@@ -4,37 +4,9 @@
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
 
-#include <cmath>
-
 #include "Version.h"
 
-vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriverContext)
-{
-	TRACE("ServerTrackedDeviceProvider::Init()");
-	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
-
-	OpenLogFile();
-	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
-
-	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof DeviceTransform);
-	memset(slamSync, 0, sizeof slamSync);
-
-	InjectHooks(pDriverContext);
-	server.Run();
-
-	return vr::VRInitError_None;
-}
-
-void ServerTrackedDeviceProvider::Cleanup()
-{
-	LOG("OpenVR-SpaceOverride unloaded");
-	CloseLogFile();
-
-	TRACE("ServerTrackedDeviceProvider::Cleanup()");
-	server.Stop();
-	DisableHooks();
-	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
-}
+#include <cmath>
 
 inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t& lhs, const vr::HmdQuaternion_t& rhs) {
 	return {
@@ -120,6 +92,34 @@ inline vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 	q.z = copysign(q.z, matrix.m[1][0] - matrix.m[0][1]);
 
 	return q;
+}
+
+vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriverContext)
+{
+	TRACE("ServerTrackedDeviceProvider::Init()");
+	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
+
+	OpenLogFile();
+	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
+
+	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof DeviceTransform);
+	memset(slamSync, 0, sizeof slamSync);
+
+	InjectHooks(pDriverContext);
+	server.Run();
+
+	return vr::VRInitError_None;
+}
+
+void ServerTrackedDeviceProvider::Cleanup()
+{
+	LOG("OpenVR-SpaceOverride unloaded");
+	CloseLogFile();
+
+	TRACE("ServerTrackedDeviceProvider::Cleanup()");
+	server.Stop();
+	DisableHooks();
+	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
@@ -406,21 +406,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 				if (rawValid)
 				{
-					double linSpeed = sqrt(
-						trackerVel[0] * trackerVel[0] +
-						trackerVel[1] * trackerVel[1] +
-						trackerVel[2] * trackerVel[2]);
-
-					double angSpeed = sqrt(
-						trackerAngVel[0] * trackerAngVel[0] +
-						trackerAngVel[1] * trackerAngVel[1] +
-						trackerAngVel[2] * trackerAngVel[2]);
-
-					const double maxLinSpeed = 1.0;
-					const double maxAngSpeed = 1.5;
-
-					if (!drift.valid || (linSpeed < maxLinSpeed && angSpeed < maxAngSpeed))
-						UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition);
+					UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition);
 				}
 			}
 			else {
