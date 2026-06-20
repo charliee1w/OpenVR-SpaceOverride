@@ -38,7 +38,7 @@ This puts the headset and all your other lighthouse devices on the same tracking
 
 Once it's calibrated, the headset is driven entirely by the tracker, so if you don't need the SLAM devices you can disable the headset's own tracking too. This also means the override works fine with your headset set to 3DoF mode or with its positional tracking disabled.
 
-## Native Override Mode
+## Disable calibrated Offset
 
 > [!CAUTION]
 > Please **DO NOT** use this, unless you understand how to do a manual TrackingOverride, this is meant for **advanced** users and not for your average person, you should not have *any* reason to use this, unless you *know* what you are doing.
@@ -47,7 +47,7 @@ Native Override feeds the raw tracker data, with the corrected offset applied, d
 
 To set it up:
 
-1. Enable the **Native Override** option.
+1. Enable the **Disable calibrated Offset** option.
 2. Run the calibration.
 3. Stand up straight and rotate your body in a circle while recentering your **headset's** space (not SteamVR's) until you find the spot where the view lines up.
 4. Once aligned, you can optionally turn off the headset's own tracking entirely, and the pose never changes from that point on.
