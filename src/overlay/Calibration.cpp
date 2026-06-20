@@ -71,14 +71,16 @@ bool EndsWith(const std::string &str, const std::string &suffix)
 	return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
 }
 
-Eigen::Vector3d AxisFromRotationMatrix3(Eigen::Matrix3d rot)
+Eigen::Vector3d RotationVector(const Eigen::Matrix3d &rot)
 {
-	return Eigen::Vector3d(rot(2,1) - rot(1,2), rot(0,2) - rot(2,0), rot(1,0) - rot(0,1));
+	Eigen::AngleAxisd aa(rot);
+	return aa.angle() * aa.axis();
 }
 
-double AngleFromRotationMatrix3(Eigen::Matrix3d rot)
+double AngleFromRotationMatrix3(const Eigen::Matrix3d &rot)
 {
-	return acos((rot(0,0) + rot(1,1) + rot(2,2) - 1.0) / 2.0);
+	double c = (rot(0,0) + rot(1,1) + rot(2,2) - 1.0) / 2.0;
+	return acos(max(-1.0, min(1.0, c)));
 }
 
 struct DetectionState
@@ -160,16 +162,14 @@ DSample DeltaRotationSamples(Sample s1, Sample s2)
 	// When stuck together, the two tracked objects rotate as a pair,
 	// therefore their axes of rotation must be equal between any given pair of samples.
 	DSample ds;
-	ds.ref = AxisFromRotationMatrix3(dref);
-	ds.target = AxisFromRotationMatrix3(dtarget);
+	ds.ref = RotationVector(dref);
+	ds.target = RotationVector(dtarget);
 
 	// Reject samples that were too close to each other.
 	auto refA = AngleFromRotationMatrix3(dref);
 	auto targetA = AngleFromRotationMatrix3(dtarget);
 	ds.valid = refA > 0.4 && targetA > 0.4 && ds.ref.norm() > 0.01 && ds.target.norm() > 0.01;
 
-	ds.ref.normalize();
-	ds.target.normalize();
 	return ds;
 }
 
@@ -189,28 +189,12 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample> &samples)
 	char buf[256];
 	snprintf(buf, sizeof buf, "Got %zd samples with %zd delta samples\n", samples.size(), deltas.size());
 	CalCtx.Log(buf);
-
-	// Kabsch algorithm
-
 	Eigen::MatrixXd refPoints(deltas.size(), 3), targetPoints(deltas.size(), 3);
-	Eigen::Vector3d refCentroid(0,0,0), targetCentroid(0,0,0);
 
 	for (size_t i = 0; i < deltas.size(); i++)
 	{
 		refPoints.row(i) = deltas[i].ref;
-		refCentroid += deltas[i].ref;
-
 		targetPoints.row(i) = deltas[i].target;
-		targetCentroid += deltas[i].target;
-	}
-
-	refCentroid /= (double) deltas.size();
-	targetCentroid /= (double) deltas.size();
-
-	for (size_t i = 0; i < deltas.size(); i++)
-	{
-		refPoints.row(i) -= refCentroid;
-		targetPoints.row(i) -= targetCentroid;
 	}
 
 	auto crossCV = refPoints.transpose() * targetPoints;
