@@ -48,7 +48,7 @@ struct CalibrationContext
 	bool continuousSync = true;
 	float predictionTime = 1.0f;
 
-	bool headFilterEnabled = true;
+	bool headFilterEnabled = false;
 	protocol::OneEuroParams headFilterParams = { 5.0, 0.8, 1.0 };
 	protocol::OneEuroParams driftFilterParams = { 3.0, 1.3, 0.6 };
 
