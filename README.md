@@ -63,28 +63,11 @@ Re-run the calibration with a **slower calibration speed**. A rushed calibration
 
 ### My view has shifted after leaving the headset unattended for a period of time
 
-You need to re-center your headset tracking while rotating around in a circle until the view matches again, this is a known quirk as of right now.
+You should see an notiication show up, follow the instructions to restore tracking.
 
 ### My view is completely messed up!
 
-Depending on where the symtoms start this could be issue with calibration if it got messed up after the calibration sequence, otherwise it could be your headset's projection drifting away from the lighthouse space's orientation.
-
-To be completely honest, this is a known trade-off because I wanted for people to be able to put the tracker anywhere in the head, I could had forced you to rotate it in a specific way in a very specific spot on your head, but this would be worse UX, so the trade-off is that I'm offsetting the orietation for all axies, which might cause an mis-alignment when your headset tracking space origin resets. 
-
-You have two ways to currently fix this:
-
-(A) re-center your headset till the view matches again
-(b) re-calibrate with the new origin
-
-I have plans in the future to fix this automatically so you as an user won't notice the shift, but currently this is not implemented, thanks for your understanding.
-
-### Steam Link feels off
-
-This is expected, see [Compatibility](#compatibility). Steam Link seems to apply its own reprojection / pose prediction on-device on top of the overridden pose, and it's stage tracked rather than local space tracked, which breaks yaw correction. For the best experience, use PICO Connect, Virtual Desktop or ALVR.
-
-### The view seems to have odd roll effect
-
-Turn on "Disable Angular Velocity" in the Settings.
+Your headset lost tracking it's tracking space, re-calibrate.
 
 ### Being forced to look into one direction
 
@@ -117,9 +100,15 @@ The mounted tracker drives your *entire headset pose*, so the tracker's quality 
 
 Yes. The headset's display pipeline and the lighthouse tracker run on different clocks, so wireless streaming latency (and an unstable connection in general) can introduce a delay between your real head movement and the tracker-driven pose, which shows up as lag or swimming in your view. A solid Wi-Fi setup (or wired connection where possible) keeps this negligible.
 
+### Does it drift?
+
+No, all drift is induced by poor lighthouse perormance, please ensure your lighthouse setup does not have interference.
+
+You can use guide such as: [Link](https://www.notion.so/yeove/SteamVR-Hardware-Troubleshooting-Megathread-Setup-Guide-16fc956d336a8037b738d1b0b1ded2f0#1c0c956d336a8035b76dd1b87527d180)
+
 ## Acknowledgements
 
-This project is a fork of [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator). Huge thanks to [pushrax](https://github.com/pushrax) for their work, which this project builds on.
+This project uses/used substancial parts of [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator). Huge thanks to [pushrax](https://github.com/pushrax) for their work, which this project builds on.
 
 ## License
 
