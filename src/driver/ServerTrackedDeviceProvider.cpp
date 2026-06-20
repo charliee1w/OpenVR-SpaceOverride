@@ -84,10 +84,10 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof DeviceTransform);
 	memset(slamSync, 0, sizeof slamSync);
 
-	drift.rotationFilter.params = { 5.0, 1.3, 0.6 };
-	drift.translationFilter.params = { 5.0, 1.3, 0.6 };
-	headFilter.rotationFilter.params = { 3.0, 0.8, 1.0 };
-	headFilter.translationFilter.params = { 3.0, 0.8, 1.0 };
+	drift.rotationFilter.params = { 3.0, 1.3, 0.6 };
+	drift.translationFilter.params = { 3.0, 1.3, 0.6 };
+	headFilter.rotationFilter.params = { 5.0, 0.8, 1.0 };
+	headFilter.translationFilter.params = { 5.0, 0.8, 1.0 };
 
 	InjectHooks(pDriverContext);
 	server.Run();
