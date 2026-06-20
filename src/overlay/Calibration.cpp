@@ -565,7 +565,8 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			continue;
 
 		bool sync = ctx.continuousSync
-			&& id != vr::k_unTrackedDeviceIndex_Hmd
+			// NOTE: this allows HMD itself to be synced, this might work, but if people start reporting issues, remove this, myself to myself
+			//&& id != vr::k_unTrackedDeviceIndex_Hmd
 			&& deviceClass != vr::TrackedDeviceClass_TrackingReference;
 
 		if (sync)
