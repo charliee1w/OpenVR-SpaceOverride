@@ -94,9 +94,17 @@ if (-not (Test-Path $VrPathReg)) {
     throw "vrpathreg.exe not found: $VrPathReg"
 }
 try {
-    & $VrPathReg adddriver (Join-Path $InstallRoot "driver")
-    if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
-    Write-Host "  OK external driver registered"
+    & $VrPathReg removedriver "spaceoverride" 2>$null
+    & $VrPathReg removedriver (Join-Path $InstallRoot "driver") 2>$null
+    if ($pfDriverCopied -and (Test-Path $InstallDriverManifest)) {
+        & $VrPathReg adddriver (Join-Path $InstallRoot "driver")
+        if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+        Write-Host "  OK external driver registered (Program Files)"
+    }
+    else {
+        Write-Host "  OK using Steam drivers folder only (no stale PF vrpathreg)"
+        Write-Host "     $((Split-Path $SteamDriverDll -Parent | Split-Path -Parent | Split-Path -Parent))"
+    }
 }
 catch {
     Write-Host "  SKIP vrpathreg (may need admin): $_"
