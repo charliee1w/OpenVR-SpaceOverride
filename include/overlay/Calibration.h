@@ -22,6 +22,27 @@ enum class CalibrationState
 	Editing,
 };
 
+enum class GuardianBoundaryState
+{
+	Unknown,
+	Active,
+	DisabledLikely,
+	NotConfigured,
+	Error,
+};
+
+struct GuardianBoundaryStatus
+{
+	bool valid = false;
+	GuardianBoundaryState state = GuardianBoundaryState::Unknown;
+	vr::ChaperoneCalibrationState calibrationState = vr::ChaperoneCalibrationState_OK;
+	uint32_t collisionQuadCount = 0;
+	float playAreaWidthM = 0.0f;
+	float playAreaDepthM = 0.0f;
+	bool boundsVisible = false;
+	bool slamHmd = false;
+};
+
 enum class OverrideInactiveReason
 {
 	Active,
@@ -94,6 +115,8 @@ struct CalibrationContext
 	double baselineMountRmsMm = 0.0;
 	double lastPartialMountRmsMm = 0.0;
 	double timeLastRuntimeQualityUpdate = 0.0;
+	double timeLastGuardianBoundaryUpdate = 0.0;
+	GuardianBoundaryStatus guardianBoundary;
 
 	bool headFilterEnabled = true;
 	protocol::OneEuroParams headFilterParams = filter_defaults::Head;
@@ -241,6 +264,9 @@ void FetchDriverTelemetry();
 void InvalidateAppliedDriverState();
 void ApplyRuntimeDriverSettings(double timeSec);
 void UpdateRuntimeTrackingQuality(CalibrationContext& ctx);
+void UpdateGuardianBoundaryStatus(CalibrationContext& ctx);
+const char* GuardianBoundaryStateText(GuardianBoundaryState state, bool slamHmd);
+const char* ChaperoneCalibrationStateText(vr::ChaperoneCalibrationState state);
 OverrideStatus EvaluateOverrideStatus(const CalibrationContext& ctx);
 const char* OverrideInactiveReasonText(OverrideInactiveReason reason);
 const char* DriverOverrideInactiveReasonText(protocol::DriverOverrideInactiveReason reason);

@@ -647,6 +647,48 @@ void UserInterface::Render(bool runningInOverlay)
 				if (!CalCtx.ipcHealthy)
 					ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.3f, 1.0f), "IPC: unhealthy (driver unreachable or rejected last request)");
 
+				if (CalCtx.guardianBoundary.valid)
+				{
+					const auto& g = CalCtx.guardianBoundary;
+					ImVec4 color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+					switch (g.state)
+					{
+					case GuardianBoundaryState::Active:
+						color = ImVec4(0.2f, 0.8f, 0.3f, 1.0f);
+						break;
+					case GuardianBoundaryState::DisabledLikely:
+						color = ImVec4(1.0f, 0.75f, 0.2f, 1.0f);
+						break;
+					case GuardianBoundaryState::NotConfigured:
+					case GuardianBoundaryState::Unknown:
+						color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+						break;
+					case GuardianBoundaryState::Error:
+						color = ImVec4(0.9f, 0.35f, 0.3f, 1.0f);
+						break;
+					}
+
+					ImGui::TextColored(color, "%s", GuardianBoundaryStateText(g.state, g.slamHmd));
+					ImGui::Text("  Bounds quads: %u, play area: %.2f x %.2f m, visible: %s",
+						g.collisionQuadCount,
+						g.playAreaWidthM,
+						g.playAreaDepthM,
+						g.boundsVisible ? "yes" : "no");
+					ImGui::Text("  Chaperone cal: %s", ChaperoneCalibrationStateText(g.calibrationState));
+					if (g.state == GuardianBoundaryState::DisabledLikely)
+					{
+						ImGui::TextWrapped(
+							"Quest dev settings often disable guardian entirely. That can reduce playspace "
+							"shifts but also removes boundary warnings.");
+					}
+				}
+				else
+				{
+					ImGui::TextDisabled("Guardian / chaperone status unavailable");
+				}
+
+				ImGui::Separator();
+
 				if (CalCtx.driverTelemetryValid)
 				{
 					const auto& t = CalCtx.driverTelemetry;

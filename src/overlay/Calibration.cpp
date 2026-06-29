@@ -708,6 +708,93 @@ bool IsStageTrackingSpace()
 	return vr::VRCompositor()->GetTrackingSpace() == vr::TrackingUniverseStanding;
 }
 
+static bool IsSlamTrackingSystem(const std::string& trackingSystem)
+{
+	return trackingSystem == "oculus"
+		|| trackingSystem == "holographic"
+		|| StartsWith(trackingSystem, "window");
+}
+
+const char* ChaperoneCalibrationStateText(vr::ChaperoneCalibrationState state)
+{
+	switch (state)
+	{
+	case vr::ChaperoneCalibrationState_OK: return "OK";
+	case vr::ChaperoneCalibrationState_Warning: return "Warning";
+	case vr::ChaperoneCalibrationState_Warning_BaseStationMayHaveMoved: return "Warning: base station moved";
+	case vr::ChaperoneCalibrationState_Warning_BaseStationRemoved: return "Warning: base station removed";
+	case vr::ChaperoneCalibrationState_Warning_SeatedBoundsInvalid: return "Warning: seated bounds invalid";
+	case vr::ChaperoneCalibrationState_Error: return "Error";
+	case vr::ChaperoneCalibrationState_Error_BaseStationUninitialized: return "Error: base station uninitialized";
+	case vr::ChaperoneCalibrationState_Error_BaseStationConflict: return "Error: base station conflict";
+	case vr::ChaperoneCalibrationState_Error_PlayAreaInvalid: return "Error: play area invalid";
+	case vr::ChaperoneCalibrationState_Error_CollisionBoundsInvalid: return "Error: collision bounds invalid";
+	default: return "Unknown";
+	}
+}
+
+const char* GuardianBoundaryStateText(GuardianBoundaryState state, bool slamHmd)
+{
+	switch (state)
+	{
+	case GuardianBoundaryState::Active:
+		return slamHmd ? "Quest guardian: ON (bounds in SteamVR)" : "Chaperone bounds: active";
+	case GuardianBoundaryState::DisabledLikely:
+		return slamHmd
+			? "Quest guardian: OFF (likely disabled in Quest dev settings)"
+			: "Chaperone bounds: none (disabled or not configured)";
+	case GuardianBoundaryState::NotConfigured:
+		return slamHmd ? "Quest guardian: not configured (no bounds)" : "Chaperone bounds: not configured";
+	case GuardianBoundaryState::Error:
+		return slamHmd ? "Quest guardian: error / invalid" : "Chaperone bounds: error";
+	default:
+		return slamHmd ? "Quest guardian: unknown" : "Chaperone bounds: unknown";
+	}
+}
+
+void UpdateGuardianBoundaryStatus(CalibrationContext& ctx)
+{
+	ctx.guardianBoundary = {};
+
+	if (!vr::VRSystem() || !vr::VRChaperone() || !vr::VRChaperoneSetup())
+		return;
+
+	auto& status = ctx.guardianBoundary;
+	status.valid = true;
+
+	const std::string hmdSystem = GetDeviceTrackingSystem(vr::k_unTrackedDeviceIndex_Hmd);
+	status.slamHmd = IsSlamTrackingSystem(hmdSystem);
+	status.calibrationState = vr::VRChaperone()->GetCalibrationState();
+	status.boundsVisible = vr::VRChaperone()->AreBoundsVisible();
+
+	uint32_t quadCount = 0;
+	vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
+	status.collisionQuadCount = quadCount;
+
+	float sizeX = 0.0f;
+	float sizeZ = 0.0f;
+	if (vr::VRChaperone()->GetPlayAreaSize(&sizeX, &sizeZ))
+	{
+		status.playAreaWidthM = sizeX;
+		status.playAreaDepthM = sizeZ;
+	}
+
+	const bool noCollisionBounds = quadCount == 0;
+	const bool noPlayArea = sizeX < 0.01f && sizeZ < 0.01f;
+	const bool calError = status.calibrationState >= vr::ChaperoneCalibrationState_Error;
+
+	if (status.slamHmd && noCollisionBounds && noPlayArea)
+		status.state = GuardianBoundaryState::DisabledLikely;
+	else if (noCollisionBounds && noPlayArea)
+		status.state = GuardianBoundaryState::NotConfigured;
+	else if (calError && noCollisionBounds)
+		status.state = GuardianBoundaryState::Error;
+	else if (!noCollisionBounds || !noPlayArea)
+		status.state = GuardianBoundaryState::Active;
+	else
+		status.state = GuardianBoundaryState::Unknown;
+}
+
 static std::vector<uint32_t> FindTrackerIdsBySerial(const CalibrationContext& ctx)
 {
 	std::vector<uint32_t> matches;
@@ -1360,6 +1447,12 @@ void CalibrationTick(double time)
 	{
 		FetchDriverTelemetry();
 		ctx.timeLastDriverTelemetryFetch = time;
+	}
+
+	if (ctx.state == CalibrationState::None && (time - ctx.timeLastGuardianBoundaryUpdate) >= 1.0)
+	{
+		UpdateGuardianBoundaryStatus(ctx);
+		ctx.timeLastGuardianBoundaryUpdate = time;
 	}
 
 	if (ctx.validProfile && ctx.state == CalibrationState::None && EvaluateOverrideStatus(ctx).active
