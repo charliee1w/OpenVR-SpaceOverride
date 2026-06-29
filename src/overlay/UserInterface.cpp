@@ -540,7 +540,13 @@ void UserInterface::Render(bool runningInOverlay)
 
 			runtimeSettingsChanged |= ImGui::Checkbox("Enable Angular Velocity", &CalCtx.enableAngularVelocity);
 			ImGui::SetItemTooltip(
-				"Enables angular velocity reporting, as it may cause issues with some devices, it is disabled by default.");
+				"Feeds angular velocity into SteamVR for smoother prediction.\n"
+				"On by default; disable only if a device misbehaves with ang-vel enabled.");
+
+			runtimeSettingsChanged |= ImGui::Checkbox("Auto partial recal on mount drift", &CalCtx.autoPartialRecalOnMountDrift);
+			ImGui::SetItemTooltip(
+				"When runtime mount residual stays above 30 mm for ~7.5 s, automatically runs a partial\n"
+				"recalibration to refresh the tracker-to-HMD offset. Cooldown: 5 minutes.");
 
 			runtimeSettingsChanged |= ImGui::Checkbox("Relative Calibration", &CalCtx.continuousSync);
 			ImGui::SetItemTooltip(
@@ -577,7 +583,7 @@ void UserInterface::Render(bool runningInOverlay)
 
 			ImGui::Text("Prediction Time");
 			ImGui::SameLine();
-			const float sliderMax = CalCtx.predictionAuto ? 3.0f : 10.0f;
+			const float sliderMax = CalCtx.predictionAuto ? 4.0f : 10.0f;
 			ImGui::BeginDisabled(CalCtx.predictionAuto);
 			if (ImGui::SliderFloat("##prediction_time", &CalCtx.predictionTime, 0.0f, sliderMax, "%.1f frames"))
 				runtimeSettingsChanged = true;
@@ -589,13 +595,13 @@ void UserInterface::Render(bool runningInOverlay)
 			ImGui::EndDisabled();
 			ImGui::SetItemTooltip(
 				"How many frames of prediction SteamVR applies to the tracker.\n"
-				"Some wireless solutions may need more prediction to feel smooth.\n"
+				"Wireless streaming (e.g. Virtual Desktop) often benefits from more prediction.\n"
 				"Adjusting the slider disables Auto mode.");
 
 			runtimeSettingsChanged |= ImGui::Checkbox("Auto", &CalCtx.predictionAuto);
 			ImGui::SetItemTooltip(
-				"Estimates wireless latency from tracker vs SLAM angular velocity over a 2s window\n"
-				"and tunes prediction to 0–3 frames. Disable to use the manual slider.");
+				"Estimates wireless latency from tracker vs SLAM velocity over a 2 s window,\n"
+				"adds a small wireless bias, and tunes prediction to 0–4 frames. Disable for manual control.");
 
 			if (CalCtx.predictionAuto)
 			{

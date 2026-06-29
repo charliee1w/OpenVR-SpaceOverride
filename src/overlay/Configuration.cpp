@@ -111,7 +111,10 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
 	else
 		ctx.fallbackToSlam = false;
-	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
+	if (obj["eAngVel"].is<bool>())
+		ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
+	else
+		ctx.enableAngularVelocity = true;
 
 	if (obj["continuousSync"].is<bool>())
 		ctx.continuousSync = obj["continuousSync"].get<bool>();
@@ -133,7 +136,12 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["predictionAuto"].is<bool>())
 		ctx.predictionAuto = obj["predictionAuto"].get<bool>();
 	else
-		ctx.predictionAuto = false;
+		ctx.predictionAuto = true;
+
+	if (obj["autoPartialRecalOnMountDrift"].is<bool>())
+		ctx.autoPartialRecalOnMountDrift = obj["autoPartialRecalOnMountDrift"].get<bool>();
+	else
+		ctx.autoPartialRecalOnMountDrift = true;
 
 	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams &out, protocol::OneEuroParams def) {
 		out = def;
@@ -254,6 +262,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	double time = ctx.predictionTime;
 	profile["predictionTime"].set<double>(time);
 	profile["predictionAuto"].set<bool>(ctx.predictionAuto);
+	profile["autoPartialRecalOnMountDrift"].set<bool>(ctx.autoPartialRecalOnMountDrift);
 
 	profile["headFilterEnabled"].set<bool>(ctx.headFilterEnabled);
 

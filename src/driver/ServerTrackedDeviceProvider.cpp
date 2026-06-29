@@ -16,7 +16,9 @@ namespace
 	constexpr double BlendToSlamSec = 0.225;
 	constexpr double MinScale = 0.01;
 	constexpr double MaxScale = 100.0;
-	constexpr float MaxPredictionFrames = 3.0f;
+	constexpr float MaxPredictionFrames = 4.0f;
+	constexpr float WirelessStreamBiasFrames = 0.75f;
+	constexpr float WirelessPredictionFallbackFrames = 2.0f;
 
 	bool IsValidDeviceIndex(uint32_t id)
 	{
@@ -378,9 +380,15 @@ bool ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 
 float ServerTrackedDeviceProvider::EffectivePredictionFrames() const
 {
-	if (hmdTracker.predictionAuto && predictionTune.estimateValid)
-		return predictionTune.appliedPredictionFrames;
-	return hmdTracker.manualPredictionTime;
+	float frames = hmdTracker.manualPredictionTime;
+	if (hmdTracker.predictionAuto)
+	{
+		frames = predictionTune.estimateValid
+			? predictionTune.appliedPredictionFrames
+			: WirelessPredictionFallbackFrames;
+		frames += WirelessStreamBiasFrames;
+	}
+	return std::clamp(frames, 0.0f, MaxPredictionFrames);
 }
 
 void ServerTrackedDeviceProvider::RecordPredictionSample(
@@ -428,7 +436,7 @@ void ServerTrackedDeviceProvider::UpdatePredictionAutoTune()
 	series.trackerLin.assign(tune.trackerLinSamples.begin(), tune.trackerLinSamples.end());
 	series.slamLin.assign(tune.slamLinSamples.begin(), tune.slamLinSamples.end());
 
-	auto estimate = calibration::estimatePredictionLagFrames(series);
+	auto estimate = calibration::estimatePredictionLagFrames(series, 45, 4);
 	if (!estimate.valid)
 		return;
 
@@ -437,8 +445,8 @@ void ServerTrackedDeviceProvider::UpdatePredictionAutoTune()
 	const float hz = tune.displayHz > 1.0f ? tune.displayHz : 1.0f;
 	tune.estimatedLagMs = tune.estimatedLagFrames * 1000.0f / hz;
 
-	const float target = std::clamp(tune.estimatedLagFrames, 0.0f, 3.0f);
-	tune.appliedPredictionFrames += (target - tune.appliedPredictionFrames) * 0.15f;
+	const float target = std::clamp(tune.estimatedLagFrames + WirelessStreamBiasFrames, 0.0f, MaxPredictionFrames);
+	tune.appliedPredictionFrames += (target - tune.appliedPredictionFrames) * 0.25f;
 	hmdTracker.predictionTime = tune.appliedPredictionFrames;
 }
 

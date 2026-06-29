@@ -66,11 +66,11 @@ struct CalibrationContext
 
 	bool enableNative = false;
 	bool fallbackToSlam = false;
-	bool enableAngularVelocity = false;
+	bool enableAngularVelocity = true;
 	bool continuousSync = false;
 	bool syncHmdDrift = false;
 	float predictionTime = 1.0f;
-	bool predictionAuto = false;
+	bool predictionAuto = true;
 	float predictionLagMs = 0.0f;
 	float predictionLagFrames = 0.0f;
 	float autoPredictionFrames = 1.0f;
@@ -163,6 +163,12 @@ struct CalibrationContext
 	static constexpr size_t LiveQualityMinSamples = 8;
 	static constexpr double TundraJitterWarnThresholdMeters = 0.012;
 	static constexpr double RuntimeResidualWarnMm = 30.0;
+	static constexpr int RuntimeResidualHighStreakThreshold = 15;
+	static constexpr double AutoPartialRecalCooldownSec = 300.0;
+
+	bool autoPartialRecalOnMountDrift = true;
+	int runtimeResidualHighStreak = 0;
+	double timeLastAutoPartialRecal = 0.0;
 	static constexpr double MountRigidityWarnRatio = 1.5;
 	static constexpr double MountRigidityWarnMinDeltaMm = 5.0;
 

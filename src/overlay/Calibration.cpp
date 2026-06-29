@@ -350,6 +350,11 @@ void UpdateRuntimeTrackingQuality(CalibrationContext& ctx)
 	ctx.runtimeResidualMm = calibration::runtimeMountResidualMm(slamHmd, tracker, calRot, calTransM, mount);
 	ctx.runtimeResidualValid = true;
 
+	if (ctx.runtimeResidualMm > CalibrationContext::RuntimeResidualWarnMm)
+		ctx.runtimeResidualHighStreak++;
+	else
+		ctx.runtimeResidualHighStreak = 0;
+
 	if (g_runtimeQualityPrevValid)
 	{
 		const auto shift = calibration::detectGuardianShift(g_runtimePrevSlam, slamHmd, g_runtimePrevTracker, tracker);
@@ -1021,6 +1026,7 @@ static std::vector<calibration::Sample> collectedSamples;
 static int coplanarRetries = 0;
 static int calibrationAutoAttempts = 0;
 static CalibrationContext::Speed speedAtSessionStart = CalibrationContext::FAST;
+static bool hadValidProfileAtCalStart = false;
 
 const char* CalibrationSpeedName(CalibrationContext::Speed speed)
 {
@@ -1175,9 +1181,17 @@ static void FinishFullCalibration(CalibrationContext& ctx, std::vector<calibrati
 
 	ApplyRelativeOffset(ctx, samples, calRot, calTransM);
 
+	if (!hadValidProfileAtCalStart)
+	{
+		ctx.predictionAuto = true;
+		ctx.enableAngularVelocity = true;
+		CalCtx.Log("First calibration — enabled prediction auto-tune and angular velocity.\n");
+	}
+
 	ctx.validProfile = true;
 	ctx.lastCalibrationTime = (double)std::time(nullptr);
 	ctx.lastCalibrationRmsMm = rmsError * 1000.0;
+	ctx.runtimeResidualHighStreak = 0;
 	InvalidateAppliedDriverState();
 	SaveProfile(ctx);
 	CalCtx.Log("Finished calibration, profile saved\n");
@@ -1239,6 +1253,7 @@ static void FinishPartialCalibration(CalibrationContext& ctx, std::vector<calibr
 	}
 
 	ctx.lastCalibrationTime = (double)std::time(nullptr);
+	ctx.runtimeResidualHighStreak = 0;
 	InvalidateAppliedDriverState();
 	SaveProfile(ctx);
 	CalCtx.Log("Mount offset updated, profile saved\n");
@@ -1254,6 +1269,7 @@ static void FinishPartialCalibration(CalibrationContext& ctx, std::vector<calibr
 
 void StartCalibration()
 {
+	hadValidProfileAtCalStart = CalCtx.validProfile;
 	CalCtx.calibrationFailureOffer = false;
 	CalCtx.lastCalibrationRmsMm = 0.0;
 	CalCtx.state = CalibrationState::Begin;
@@ -1349,6 +1365,18 @@ void CalibrationTick(double time)
 	{
 		UpdateRuntimeTrackingQuality(ctx);
 		ctx.timeLastRuntimeQualityUpdate = time;
+
+		if (ctx.autoPartialRecalOnMountDrift
+			&& ctx.runtimeResidualHighStreak >= CalibrationContext::RuntimeResidualHighStreakThreshold
+			&& (time - ctx.timeLastAutoPartialRecal) >= CalibrationContext::AutoPartialRecalCooldownSec)
+		{
+			ctx.runtimeResidualHighStreak = 0;
+			ctx.timeLastAutoPartialRecal = time;
+			StartPartialRecalibration();
+			ShowCalibrationNotification(
+				"Mount drift detected — re-estimating tracker offset.\n"
+				"Keep your head still for a few seconds.");
+		}
 	}
 
 	if (ctx.state == CalibrationState::None)

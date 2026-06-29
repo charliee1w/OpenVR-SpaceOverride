@@ -1,5 +1,18 @@
 # Changelog
 
+## 8.1.0 — wireless feel pass (2026-06-29)
+
+### Feel / prediction
+- Prediction auto-tune now allows up to 4 frames with a wireless stream bias (+0.75 frames)
+- Fallback prediction when auto-tune is warming up: 2 frames
+- First-time calibration enables prediction auto and angular velocity by default
+- Profile migration: missing `predictionAuto` / `eAngVel` keys default to on
+
+### Mount maintenance
+- Auto partial recal when runtime mount residual stays > 30 mm for ~7.5 s (5 min cooldown)
+- Settings checkbox to disable auto partial recal
+- Runtime residual streak resets after successful full or partial calibration
+
 ## 8.0.0 — stranger-ready fork release (2026-06-29)
 
 ### Install & docs
