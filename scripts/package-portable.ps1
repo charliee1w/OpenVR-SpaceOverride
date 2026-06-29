@@ -8,6 +8,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path $PSScriptRoot -Parent
 $BuildDriver = Join-Path $RepoRoot "build-overlay\Release\driver_spaceoverride.dll"
 $BuildOverlay = Join-Path $RepoRoot "build-overlay\Release\OpenVR-SpaceOverride.exe"
+$OpenVrApiDll = Join-Path $RepoRoot "3rdparty\OpenVR\bin\win64\openvr_api.dll"
+$IconPng = Join-Path $RepoRoot "resources\icon.png"
 $Manifest = Join-Path $RepoRoot "resources\manifest.vrmanifest"
 $DriverManifest = Join-Path $RepoRoot "dev-resources\driver\driver.vrdrivermanifest"
 
@@ -23,6 +25,8 @@ function Require-Path([string]$Path, [string]$Label) {
 
 Require-Path $BuildDriver "driver DLL"
 Require-Path $BuildOverlay "overlay EXE"
+Require-Path $OpenVrApiDll "openvr_api.dll"
+Require-Path $IconPng "icon.png"
 Require-Path $Manifest "overlay manifest"
 Require-Path $DriverManifest "driver manifest"
 
@@ -36,6 +40,8 @@ New-Item -ItemType Directory -Path $OverlayRoot -Force | Out-Null
 Copy-Item $BuildDriver (Join-Path $SteamDriverRoot "bin\win64\driver_spaceoverride.dll") -Force
 Copy-Item $DriverManifest $SteamDriverRoot -Force
 Copy-Item $BuildOverlay (Join-Path $OverlayRoot "OpenVR-SpaceOverride.exe") -Force
+Copy-Item $OpenVrApiDll (Join-Path $OverlayRoot "openvr_api.dll") -Force
+Copy-Item $IconPng (Join-Path $OverlayRoot "icon.png") -Force
 Copy-Item $Manifest $OverlayRoot -Force
 
 $readme = @"

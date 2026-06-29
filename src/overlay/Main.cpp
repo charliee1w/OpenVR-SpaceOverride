@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <direct.h>
 
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <chrono>
@@ -163,9 +164,13 @@ int main(int argc, char** argv)
     try {
         g_overlay->Create(vr::VROverlayType_Dashboard, APP_KEY, APP_NAME);
 
-        std::string thumbnail_path = SDL_GetBasePath();
-        thumbnail_path += "\\icon.png";
-        g_overlay->SetThumbnail(thumbnail_path);
+        if (const char* basePath = SDL_GetBasePath())
+        {
+            std::string thumbnail_path = basePath;
+            thumbnail_path += "icon.png";
+            if (std::filesystem::exists(thumbnail_path))
+                g_overlay->SetThumbnail(thumbnail_path);
+        }
 
         g_overlay->SetInputMethod(vr::VROverlayInputMethod_Mouse);
         g_overlay->SetWidth(3.0f);
