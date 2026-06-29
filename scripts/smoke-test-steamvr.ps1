@@ -9,6 +9,7 @@ $BuildOverlayExe = Join-Path $RepoRoot "build-overlay\Release\OpenVR-SpaceOverri
 $SteamDriverDll = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\drivers\spaceoverride\bin\win64\driver_spaceoverride.dll"
 $SteamManifest = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\drivers\spaceoverride\driver.vrdrivermanifest"
 $InstallOverlay = "C:\Program Files\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
+$PortableOverlay = Join-Path $RepoRoot "dist\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
 $RegistryKey = "HKCU:\Software\Classes\Local Settings\Software\OpenVR-SpaceOverride"
 
 $failures = @()
@@ -52,20 +53,42 @@ Write-Host ""
 Write-Host "SteamVR install paths:"
 Test-Exists $SteamDriverDll "Steam driver DLL" | Out-Null
 Test-Exists $SteamManifest "driver manifest" | Out-Null
-$PfOverlay = "C:\Program Files\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
-if (Test-Path $PfOverlay) {
-    $buildOverlayHash = (Get-FileHash $BuildOverlayExe -Algorithm SHA256).Hash
-    $pfOverlayHash = (Get-FileHash $PfOverlay -Algorithm SHA256).Hash
-    if ($buildOverlayHash -eq $pfOverlayHash) {
-        Write-Host "OK   Program Files overlay matches build" -ForegroundColor Green
+$buildOverlayHash = (Get-FileHash $BuildOverlayExe -Algorithm SHA256).Hash
+$overlayOk = $false
+
+if (Test-Path $PortableOverlay) {
+    $portableHash = (Get-FileHash $PortableOverlay -Algorithm SHA256).Hash
+    if ($buildOverlayHash -eq $portableHash) {
+        Write-Host "OK   Portable dist overlay matches build" -ForegroundColor Green
+        $overlayOk = $true
     }
     else {
-        Write-Host "FAIL Program Files overlay stale (autolaunch uses old EXE)" -ForegroundColor Red
-        $failures += "Program Files overlay hash mismatch"
+        Write-Host "FAIL Portable dist overlay stale" -ForegroundColor Red
+        $failures += "Portable dist overlay hash mismatch"
+    }
+}
+else {
+    Write-Host "WARN Portable dist overlay missing (run deploy-steamvr.ps1)" -ForegroundColor Yellow
+}
+
+if (Test-Path $InstallOverlay) {
+    $pfOverlayHash = (Get-FileHash $InstallOverlay -Algorithm SHA256).Hash
+    if ($buildOverlayHash -eq $pfOverlayHash) {
+        Write-Host "OK   Program Files overlay matches build" -ForegroundColor Green
+        $overlayOk = $true
+    }
+    else {
+        Write-Host "WARN Program Files overlay stale (use portable dist or admin deploy)" -ForegroundColor Yellow
+        if (-not $overlayOk) {
+            $failures += "No overlay path matches build (PF stale, portable missing or stale)"
+        }
     }
 }
 else {
     Write-Host "WARN Program Files overlay missing (deploy may need admin)" -ForegroundColor Yellow
+    if (-not $overlayOk) {
+        $failures += "No overlay install found"
+    }
 }
 
 Write-Host ""
@@ -80,17 +103,17 @@ try {
         Write-Host "OK   registry profile present ($($config.Config.Length) chars)" -ForegroundColor Green
     }
     else {
-        Write-Host "WARN registry profile empty — user needs calibration" -ForegroundColor Yellow
+        Write-Host "WARN registry profile empty - user needs calibration" -ForegroundColor Yellow
     }
 }
 catch {
-    Write-Host "WARN registry key missing — first run or profile wiped" -ForegroundColor Yellow
+    Write-Host "WARN registry key missing - first run or profile wiped" -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "SteamVR process:"
 if (Get-Process -Name "vrserver" -ErrorAction SilentlyContinue) {
-    Write-Host "NOTE SteamVR is running — restart to load new driver DLL if just deployed" -ForegroundColor Yellow
+    Write-Host "NOTE SteamVR is running - restart to load new driver DLL if just deployed" -ForegroundColor Yellow
 }
 else {
     Write-Host "OK   SteamVR not running" -ForegroundColor Green
@@ -98,7 +121,7 @@ else {
 
 Write-Host ""
 if ($failures.Count -gt 0) {
-    Write-Host "SMOKE TEST FAILED ($($failures.Count) issues):" -ForegroundColor Red
+    Write-Host ('SMOKE TEST FAILED ({0} issues):' -f $failures.Count) -ForegroundColor Red
     $failures | ForEach-Object { Write-Host "  - $_" }
     exit 1
 }

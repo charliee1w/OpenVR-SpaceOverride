@@ -350,17 +350,19 @@ void UpdateRuntimeTrackingQuality(CalibrationContext& ctx)
 	ctx.runtimeResidualMm = calibration::runtimeMountResidualMm(slamHmd, tracker, calRot, calTransM, mount);
 	ctx.runtimeResidualValid = true;
 
-	if (ctx.runtimeResidualMm > CalibrationContext::RuntimeResidualWarnMm)
-		ctx.runtimeResidualHighStreak++;
-	else
-		ctx.runtimeResidualHighStreak = 0;
-
 	if (g_runtimeQualityPrevValid)
 	{
 		const auto shift = calibration::detectGuardianShift(g_runtimePrevSlam, slamHmd, g_runtimePrevTracker, tracker);
 		ctx.guardianShiftSuspect = shift.suspect;
 		ctx.guardianShiftSlamJumpMm = shift.slamJumpMm;
 	}
+
+	if (ctx.guardianShiftSuspect)
+		ctx.runtimeResidualHighStreak = 0;
+	else if (ctx.runtimeResidualMm > CalibrationContext::RuntimeResidualWarnMm)
+		ctx.runtimeResidualHighStreak++;
+	else
+		ctx.runtimeResidualHighStreak = 0;
 
 	g_runtimePrevSlam = slamHmd;
 	g_runtimePrevTracker = tracker;
@@ -1367,6 +1369,7 @@ void CalibrationTick(double time)
 		ctx.timeLastRuntimeQualityUpdate = time;
 
 		if (ctx.autoPartialRecalOnMountDrift
+			&& !ctx.guardianShiftSuspect
 			&& ctx.runtimeResidualHighStreak >= CalibrationContext::RuntimeResidualHighStreakThreshold
 			&& (time - ctx.timeLastAutoPartialRecal) >= CalibrationContext::AutoPartialRecalCooldownSec)
 		{

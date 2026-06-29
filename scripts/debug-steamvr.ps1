@@ -6,12 +6,13 @@ $BuildOverlay = Join-Path $RepoRoot "build-overlay\Release\OpenVR-SpaceOverride.
 $BuildDriver = Join-Path $RepoRoot "build-overlay\Release\driver_spaceoverride.dll"
 $SteamDriver = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\drivers\spaceoverride\bin\win64\driver_spaceoverride.dll"
 $PfOverlay = "C:\Program Files\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
+$DistOverlay = Join-Path $RepoRoot "dist\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
 $WorkspaceOverlay = Join-Path (Split-Path $RepoRoot -Parent) "OpenVR-SpaceOverride.exe"
 $RegistryKey = "HKCU:\Software\Classes\Local Settings\Software\OpenVR-SpaceOverride"
 $Logs = @(
-    "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\space_calibrator_driver.log",
+    "$env:LOCALAPPDATA\openvr\logs\space_calibrator_driver.log",
     "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\space_calibrator_driver.log",
-    "$env:LOCALAPPDATA\openvr\logs\space_calibrator_driver.log"
+    "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\space_calibrator_driver.log"
 )
 
 function Hash-Short([string]$Path) {
@@ -39,6 +40,7 @@ $buildDriverHash = Hash-Short $BuildDriver
 $steamDriverHash = Hash-Short $SteamDriver
 $buildOverlayHash = Hash-Short $BuildOverlay
 $pfOverlayHash = Hash-Short $PfOverlay
+$distOverlayHash = Hash-Short $DistOverlay
 $wsOverlayHash = Hash-Short $WorkspaceOverlay
 
 if ($buildDriverHash -eq $steamDriverHash) {
@@ -50,14 +52,25 @@ else {
     Write-Host "       steam: $SteamDriver -> $steamDriverHash"
 }
 
+if ($buildOverlayHash -eq $distOverlayHash) {
+    Write-Host "[OK]   Portable dist overlay matches build ($buildOverlayHash)" -ForegroundColor Green
+}
+elseif (Test-Path $DistOverlay) {
+    Write-Host "[FAIL] Portable dist overlay stale" -ForegroundColor Red
+}
+
 if ($buildOverlayHash -eq $pfOverlayHash) {
-    Write-Host "[OK]   Program Files overlay matches build ($buildOverlayHash)" -ForegroundColor Green
+    Write-Host "[OK]   Program Files overlay matches build" -ForegroundColor Green
+}
+elseif (Test-Path $PfOverlay) {
+    Write-Host '[WARN] Program Files overlay STALE - autolaunch may use old EXE' -ForegroundColor Yellow
+    Write-Host "       build:      $buildOverlayHash ($(if (Test-Path $BuildOverlay) { (Get-Item $BuildOverlay).LastWriteTime }))"
+    Write-Host "       PF install: $pfOverlayHash ($(if (Test-Path $PfOverlay) { (Get-Item $PfOverlay).LastWriteTime }))"
+    Write-Host "       Fix: run dist overlay -installmanifest, or deploy-steamvr.ps1 as Administrator"
+    Write-Host "       dist: $DistOverlay"
 }
 else {
-    Write-Host '[FAIL] Program Files overlay STALE - SteamVR autolaunch uses old EXE' -ForegroundColor Red
-    Write-Host "       build:     $buildOverlayHash ($(if (Test-Path $BuildOverlay) { (Get-Item $BuildOverlay).LastWriteTime }))"
-    Write-Host "       PF install: $pfOverlayHash ($(if (Test-Path $PfOverlay) { (Get-Item $PfOverlay).LastWriteTime }))"
-    Write-Host "       Fix: re-run deploy-steamvr.ps1 as Administrator"
+    Write-Host "[WARN] Program Files overlay missing - use portable dist" -ForegroundColor Yellow
 }
 
 if ($buildOverlayHash -eq $wsOverlayHash) {
@@ -81,6 +94,14 @@ try {
         Write-Host '[FAIL] Profile EMPTY - override inactive until calibration' -ForegroundColor Red
         Write-Host "       Cause: likely wiped by pre-fix quit bug, or never calibrated"
         Write-Host "       Fix: run Calibrate in overlay, or Import profile JSON in Settings > Diagnostics"
+        $scKey = "HKCU:\Software\Classes\Local Settings\Software\OpenVR-SpaceCalibrator"
+        try {
+            $sc = (Get-ItemProperty -Path $scKey -Name Config -ErrorAction Stop).Config
+            if ($sc -and $sc.Length -gt 20) {
+                Write-Host "       NOTE: OpenVR-SpaceCalibrator profile exists (separate product) - still need Space Override cal"
+            }
+        }
+        catch {}
     }
 }
 catch {

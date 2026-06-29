@@ -23,7 +23,8 @@ $InstallDriverManifest = Join-Path $InstallRoot "driver\driver.vrdrivermanifest"
 $InstallOverlayManifest = Join-Path $InstallRoot "manifest.vrmanifest"
 
 $VrPathReg = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\vrpathreg.exe"
-$DriverLog = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\space_calibrator_driver.log"
+$DriverLog = Join-Path $env:LOCALAPPDATA "openvr\logs\space_calibrator_driver.log"
+$LegacyDriverLog = "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\space_calibrator_driver.log"
 
 function Require-Path([string]$Path, [string]$Label) {
     if (-not (Test-Path $Path)) {
@@ -150,10 +151,13 @@ if (Test-Path $InstallDriverDll) {
     }
 }
 
-if (Test-Path $DriverLog) {
-    $lastLoad = Select-String -Path $DriverLog -Pattern "OpenVR-SpaceOverride (\d+) loaded" | Select-Object -Last 1
+foreach ($logPath in @($DriverLog, $LegacyDriverLog)) {
+    if (-not (Test-Path $logPath)) { continue }
+    $tail = Get-Content $logPath -Tail 100 -ErrorAction SilentlyContinue
+    $lastLoad = $tail | Select-String -Pattern "OpenVR-SpaceOverride .+ loaded" | Select-Object -Last 1
     if ($lastLoad) {
-        Write-Host "  Last driver log entry: $($lastLoad.Line.Trim())"
+        Write-Host "  Last driver log ($logPath): $($lastLoad.Line.Trim())"
+        break
     }
 }
 
@@ -185,9 +189,21 @@ if ((Test-Path $PortableOverlay) -and $steamRunning) {
 }
 elseif (Test-Path $PortableOverlay) {
     Write-Host "  Portable overlay ready at: $PortableDir"
-    Write-Host "  After starting SteamVR, run from that folder:"
-    Write-Host "    .\OpenVR-SpaceOverride.exe -installmanifest"
-    Write-Host "    .\OpenVR-SpaceOverride.exe -activatemultipledrivers"
+    Write-Host "  Registering autolaunch from portable dist (no admin):"
+    Push-Location $PortableDir
+    try {
+        & $PortableOverlay -installmanifest
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  OK portable overlay manifest registered"
+            & $PortableOverlay -activatemultipledrivers
+        }
+        else {
+            Write-Host "  WARN -installmanifest returned $LASTEXITCODE (SteamVR may need to be running once)"
+        }
+    }
+    finally {
+        Pop-Location
+    }
 }
 
 Write-Host ""
