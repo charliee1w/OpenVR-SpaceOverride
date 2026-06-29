@@ -254,13 +254,9 @@ static void ApplyTundraFilterDefaultsIfNeeded(CalibrationContext& ctx, uint32_t 
 	if (!ctx.trackerIsTundra)
 		return;
 
-	ctx.headFilterEnabled = true;
-	ctx.headFilterParams = filter_defaults::TundraHead;
-	ctx.driftFilterParams = filter_defaults::TundraDrift;
-
 	char buf[256];
 	snprintf(buf, sizeof buf,
-		"Tundra tracker detected — applying stronger smoothing defaults for head mount.\n");
+		"Tundra tracker detected — enable smoothing in Settings if the mount looks shaky.\n");
 	ctx.Log(buf);
 }
 
@@ -1258,11 +1254,8 @@ static void FinishFullCalibration(CalibrationContext& ctx, std::vector<calibrati
 	const double trackerJitter = calibration::trackerTranslationJitterRMS(samples);
 	if (trackerJitter > CalibrationContext::TundraJitterWarnThresholdMeters)
 	{
-		ctx.headFilterEnabled = true;
-		ctx.headFilterParams = filter_defaults::TundraHead;
-		ctx.driftFilterParams = filter_defaults::TundraDrift;
 		snprintf(buf, sizeof buf,
-			"Tracker translation jitter %.1f mm exceeds %.1f mm — applying stronger smoothing defaults.\n",
+			"Tracker translation jitter %.1f mm exceeds %.1f mm — mount may be loose; enable smoothing in Settings if needed.\n",
 			trackerJitter * 1000.0,
 			CalibrationContext::TundraJitterWarnThresholdMeters * 1000.0);
 		CalCtx.Log(buf);
@@ -1275,7 +1268,10 @@ static void FinishFullCalibration(CalibrationContext& ctx, std::vector<calibrati
 		ctx.predictionAuto = false;
 		ctx.predictionTime = 2.0f;
 		ctx.enableAngularVelocity = true;
-		CalCtx.Log("First calibration — set manual 2-frame prediction and angular velocity for VD/SLAM.\n");
+		ctx.headFilterEnabled = false;
+		ctx.headFilterParams = filter_defaults::Head;
+		ctx.driftFilterParams = filter_defaults::Off;
+		CalCtx.Log("First calibration — smoothing off, manual 2-frame prediction, angular velocity on.\n");
 	}
 
 	ctx.validProfile = true;

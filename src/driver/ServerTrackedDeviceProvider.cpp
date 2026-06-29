@@ -367,14 +367,22 @@ bool ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 		return out;
 	};
 
-	headFilter.rotationFilter.params = toParams(cmd.head);
-	headFilter.translationFilter.params = toParams(cmd.head);
-	drift.rotationFilter.params = toParams(cmd.drift);
-	drift.translationFilter.params = toParams(cmd.drift);
+	const protocol::OneEuroParams& headParams = cmd.headEnabled ? cmd.head : filter_defaults::Off;
+	const protocol::OneEuroParams& driftParams = cmd.headEnabled ? cmd.drift : filter_defaults::Off;
+
+	headFilter.rotationFilter.params = toParams(headParams);
+	headFilter.translationFilter.params = toParams(headParams);
+	drift.rotationFilter.params = toParams(driftParams);
+	drift.translationFilter.params = toParams(driftParams);
 
 	if (headFilter.enabled && !cmd.headEnabled)
 		headFilter.reset();
 	headFilter.enabled = cmd.headEnabled;
+	if (drift.valid && !cmd.headEnabled)
+	{
+		drift.rotationFilter.reset();
+		drift.translationFilter.reset();
+	}
 	return true;
 }
 

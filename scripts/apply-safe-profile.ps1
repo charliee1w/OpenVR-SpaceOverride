@@ -15,7 +15,8 @@ if ($obj -is [array]) { $p = $obj[0] } else { $p = $obj }
 $p.predictionAuto = $false
 $p.predictionTime = 2.0
 $p.eAngVel = $true
+$p.headFilterEnabled = $false
 $out = if ($obj -is [array]) { @($p) | ConvertTo-Json -Depth 8 -Compress } else { $p | ConvertTo-Json -Depth 8 -Compress }
 Set-ItemProperty -Path $regPath -Name Config -Value $out
-Write-Host 'Applied safe profile: predictionAuto=false, predictionTime=2, eAngVel=true'
+Write-Host 'Applied safe profile: predictionAuto=false, predictionTime=2, eAngVel=true, headFilterEnabled=false'
 Write-Host 'Restart SteamVR, then open Space Override once to re-apply driver state.'

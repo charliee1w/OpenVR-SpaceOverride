@@ -118,7 +118,7 @@ struct CalibrationContext
 	double timeLastGuardianBoundaryUpdate = 0.0;
 	GuardianBoundaryStatus guardianBoundary;
 
-	bool headFilterEnabled = true;
+	bool headFilterEnabled = false;
 	protocol::OneEuroParams headFilterParams = filter_defaults::Head;
 	protocol::OneEuroParams driftFilterParams = filter_defaults::Drift;
 

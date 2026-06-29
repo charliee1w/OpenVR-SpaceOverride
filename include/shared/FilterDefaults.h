@@ -8,6 +8,8 @@ namespace filter_defaults
 {
 	constexpr protocol::OneEuroParams Head{ 5.0, 0.8, 1.0 };
 	constexpr protocol::OneEuroParams Drift{ 3.0, 1.3, 0.6 };
+	// Effectively disables One Euro filtering (high cutoff = passthrough).
+	constexpr protocol::OneEuroParams Off{ 100.0, 0.0, 100.0 };
 	// Stronger smoothing for jitter-prone head mounts (e.g. Tundra trackers).
 	constexpr protocol::OneEuroParams TundraHead{ 2.5, 0.4, 0.8 };
 	constexpr protocol::OneEuroParams TundraDrift{ 2.0, 0.8, 0.5 };

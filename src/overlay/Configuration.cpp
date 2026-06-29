@@ -156,7 +156,7 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		if (o["dCutoff"].is<double>())   out.dCutoff = o["dCutoff"].get<double>();
 	};
 
-	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : true;
+	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : false;
 	loadOneEuro("headFilter", ctx.headFilterParams, filter_defaults::Head);
 	loadOneEuro("driftFilter", ctx.driftFilterParams, filter_defaults::Drift);
 
