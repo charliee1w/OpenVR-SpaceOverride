@@ -30,6 +30,21 @@ out/
 
 # Build output
 cmake-build-*
+build/
+build-overlay/
+build-driver/
+dist/
+
+# Agent / local tooling (do not publish)
+Agents.md
+AGENTS.md
+mcps/
+.cursor/
+.grok/
+
+# Logs
+*.log
+*.log.old
 
 # IDE-specific stuff:
 .idea/

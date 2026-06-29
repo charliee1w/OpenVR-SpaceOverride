@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include "Configuration.h"
+#include "FilterDefaults.h"
 
 #include <Windows.h>
 
@@ -11,6 +12,9 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <cmath>
+#include <algorithm>
+#include <cstddef>
 
 static picojson::array FloatArray(const float *buf, int numFloats)
 {
@@ -20,6 +24,22 @@ static picojson::array FloatArray(const float *buf, int numFloats)
 		arr.push_back(picojson::value(double(buf[i])));
 
 	return arr;
+}
+
+static constexpr double ProfileMinScale = 0.01;
+static constexpr double ProfileMaxScale = 100.0;
+static constexpr std::size_t MaxChaperoneGeometryFloats = 4096;
+static constexpr std::size_t MaxRegistryConfigBytes = 1024 * 1024;
+
+static bool IsFiniteNumber(double value)
+{
+	return std::isfinite(value);
+}
+
+static void RequireFinite(double value, const char *field)
+{
+	if (!IsFiniteNumber(value))
+		throw std::runtime_error(std::string("non-finite value in profile field: ") + field);
 }
 
 static void LoadFloatArray(const picojson::value &obj, float *buf, int numFloats)
@@ -52,33 +72,68 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	if (obj["hmd_serial"].is<std::string>())
 		ctx.hmdSerial = obj["hmd_serial"].get<std::string>();
+	if (obj["hmd_tracking_system"].is<std::string>())
+		ctx.hmdTrackingSystem = obj["hmd_tracking_system"].get<std::string>();
 	if (obj["tracker_serial"].is<std::string>())
 		ctx.trackerSerial = obj["tracker_serial"].get<std::string>();
+	if (obj["preferred_tracker_serial"].is<std::string>())
+		ctx.preferredTrackerSerial = obj["preferred_tracker_serial"].get<std::string>();
+	if (obj["last_calibration_time"].is<double>())
+		ctx.lastCalibrationTime = obj["last_calibration_time"].get<double>();
+	if (obj["last_calibration_rms_mm"].is<double>())
+		ctx.lastCalibrationRmsMm = obj["last_calibration_rms_mm"].get<double>();
+	if (obj["baseline_mount_rms_mm"].is<double>())
+		ctx.baselineMountRmsMm = obj["baseline_mount_rms_mm"].get<double>();
+	if (obj["last_partial_mount_rms_mm"].is<double>())
+		ctx.lastPartialMountRmsMm = obj["last_partial_mount_rms_mm"].get<double>();
 	ctx.calibratedRotation(0) = obj["roll"].get<double>();
 	ctx.calibratedRotation(1) = obj["yaw"].get<double>();
 	ctx.calibratedRotation(2) = obj["pitch"].get<double>();
 	ctx.calibratedTranslation(0) = obj["x"].get<double>();
 	ctx.calibratedTranslation(1) = obj["y"].get<double>();
 	ctx.calibratedTranslation(2) = obj["z"].get<double>();
+	for (int i = 0; i < 3; ++i)
+	{
+		RequireFinite(ctx.calibratedRotation(i), "rotation");
+		RequireFinite(ctx.calibratedTranslation(i), "translation");
+	}
 
 	if (obj["scale"].is<double>())
 		ctx.calibratedScale = obj["scale"].get<double>();
 	else
 		ctx.calibratedScale = 1.0;
+	RequireFinite(ctx.calibratedScale, "scale");
+	if (ctx.calibratedScale < ProfileMinScale || ctx.calibratedScale > ProfileMaxScale)
+		throw std::runtime_error("profile scale out of range");
 
 	ctx.enableNative = obj["native"].get<bool>();
-	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
+	if (obj["fallbackSlam"].is<bool>())
+		ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
+	else
+		ctx.fallbackToSlam = false;
 	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
 
 	if (obj["continuousSync"].is<bool>())
 		ctx.continuousSync = obj["continuousSync"].get<bool>();
 	else
-		ctx.continuousSync = true;
+		ctx.continuousSync = false;
+
+	if (obj["syncHmdDrift"].is<bool>())
+		ctx.syncHmdDrift = obj["syncHmdDrift"].get<bool>();
+	else
+		ctx.syncHmdDrift = false;
 
 	if (obj["predictionTime"].is<double>())
 		ctx.predictionTime = obj["predictionTime"].get<double>();
 	else
 		ctx.predictionTime = 1.0;
+	RequireFinite(ctx.predictionTime, "predictionTime");
+	ctx.predictionTime = std::clamp(ctx.predictionTime, 0.0f, 3.0f);
+
+	if (obj["predictionAuto"].is<bool>())
+		ctx.predictionAuto = obj["predictionAuto"].get<bool>();
+	else
+		ctx.predictionAuto = false;
 
 	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams &out, protocol::OneEuroParams def) {
 		out = def;
@@ -91,8 +146,8 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	};
 
 	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : true;
-	loadOneEuro("headFilter", ctx.headFilterParams, { 2.0, 0.5, 1.0 });
-	loadOneEuro("driftFilter", ctx.driftFilterParams, { 1.0, 0.4, 0.85 });
+	loadOneEuro("headFilter", ctx.headFilterParams, filter_defaults::Head);
+	loadOneEuro("driftFilter", ctx.driftFilterParams, filter_defaults::Drift);
 
 	if (obj["rel_qw"].is<double>())
 	{
@@ -103,7 +158,19 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.relativeTranslation.v[0] = obj["rel_tx"].get<double>();
 		ctx.relativeTranslation.v[1] = obj["rel_ty"].get<double>();
 		ctx.relativeTranslation.v[2] = obj["rel_tz"].get<double>();
-		ctx.validRelativeOffset = true;
+		RequireFinite(ctx.relativeRotation.w, "rel_qw");
+		RequireFinite(ctx.relativeRotation.x, "rel_qx");
+		RequireFinite(ctx.relativeRotation.y, "rel_qy");
+		RequireFinite(ctx.relativeRotation.z, "rel_qz");
+		RequireFinite(ctx.relativeTranslation.v[0], "rel_tx");
+		RequireFinite(ctx.relativeTranslation.v[1], "rel_ty");
+		RequireFinite(ctx.relativeTranslation.v[2], "rel_tz");
+		const double relNorm = std::sqrt(
+			ctx.relativeRotation.w * ctx.relativeRotation.w +
+			ctx.relativeRotation.x * ctx.relativeRotation.x +
+			ctx.relativeRotation.y * ctx.relativeRotation.y +
+			ctx.relativeRotation.z * ctx.relativeRotation.z);
+		ctx.validRelativeOffset = relNorm > 1e-8;
 	}
 	else
 	{
@@ -111,7 +178,12 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	}
 
 	if (obj["calibration_speed"].is<double>())
-		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
+	{
+		int speed = (int)obj["calibration_speed"].get<double>();
+		if (speed < 0 || speed > 2)
+			throw std::runtime_error("invalid calibration_speed");
+		ctx.calibrationSpeed = (CalibrationContext::Speed)speed;
+	}
 
 	if (obj["chaperone"].is<picojson::object>())
 	{
@@ -130,6 +202,9 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 			throw std::runtime_error("chaperone geometry is not an array");
 
 		auto &geometry = chaperone["geometry"].get<picojson::array>();
+
+		if (geometry.size() > MaxChaperoneGeometryFloats)
+			throw std::runtime_error("chaperone geometry too large");
 
 		if (geometry.size() > 0)
 		{
@@ -151,7 +226,17 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	picojson::object profile;
 	profile["target_tracking_system"].set<std::string>(ctx.targetTrackingSystem);
 	profile["hmd_serial"].set<std::string>(ctx.hmdSerial);
+	profile["hmd_tracking_system"].set<std::string>(ctx.hmdTrackingSystem);
 	profile["tracker_serial"].set<std::string>(ctx.trackerSerial);
+	profile["preferred_tracker_serial"].set<std::string>(ctx.preferredTrackerSerial);
+	if (ctx.lastCalibrationTime > 0.0)
+		profile["last_calibration_time"].set<double>(ctx.lastCalibrationTime);
+	if (ctx.lastCalibrationRmsMm > 0.0)
+		profile["last_calibration_rms_mm"].set<double>(ctx.lastCalibrationRmsMm);
+	if (ctx.baselineMountRmsMm > 0.0)
+		profile["baseline_mount_rms_mm"].set<double>(ctx.baselineMountRmsMm);
+	if (ctx.lastPartialMountRmsMm > 0.0)
+		profile["last_partial_mount_rms_mm"].set<double>(ctx.lastPartialMountRmsMm);
 	profile["roll"].set<double>(ctx.calibratedRotation(0));
 	profile["yaw"].set<double>(ctx.calibratedRotation(1));
 	profile["pitch"].set<double>(ctx.calibratedRotation(2));
@@ -164,9 +249,11 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
 	profile["eAngVel"].set<bool>(ctx.enableAngularVelocity);
 	profile["continuousSync"].set<bool>(ctx.continuousSync);
+	profile["syncHmdDrift"].set<bool>(ctx.syncHmdDrift);
 
 	double time = ctx.predictionTime;
 	profile["predictionTime"].set<double>(time);
+	profile["predictionAuto"].set<bool>(ctx.predictionAuto);
 
 	profile["headFilterEnabled"].set<bool>(ctx.headFilterEnabled);
 
@@ -244,6 +331,12 @@ static std::string ReadRegistryKey()
 		return "";
 	}
 
+	if (size == 0 || size > MaxRegistryConfigBytes)
+	{
+		std::cerr << "Registry profile size out of range: " << size << std::endl;
+		return "";
+	}
+
 	std::string str;
 	str.resize(size);
 
@@ -280,6 +373,7 @@ static void WriteRegistryKey(std::string str)
 void LoadProfile(CalibrationContext &ctx)
 {
 	ctx.validProfile = false;
+	InvalidateAppliedDriverState();
 
 	auto str = ReadRegistryKey();
 	if (str == "")
@@ -298,14 +392,64 @@ void LoadProfile(CalibrationContext &ctx)
 	catch (const std::runtime_error &e)
 	{
 		std::cerr << "Error loading profile: " << e.what() << std::endl;
+		ctx.Clear();
 	}
 }
 
 void SaveProfile(CalibrationContext &ctx)
 {
+	if (!ctx.validProfile)
+		return;
+
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream io;
 	WriteProfile(ctx, io);
 	WriteRegistryKey(io.str());
+}
+
+bool ExportProfileToFile(const CalibrationContext &ctx, const std::string &path)
+{
+	if (!ctx.validProfile || path.empty())
+		return false;
+
+	std::ofstream out(path, std::ios::binary);
+	if (!out)
+	{
+		std::cerr << "Failed to open profile export path: " << path << std::endl;
+		return false;
+	}
+
+	CalibrationContext copy = ctx;
+	std::stringstream io;
+	WriteProfile(copy, io);
+	out << io.str();
+	return out.good();
+}
+
+bool ImportProfileFromFile(CalibrationContext &ctx, const std::string &path)
+{
+	if (path.empty())
+		return false;
+
+	std::ifstream in(path, std::ios::binary);
+	if (!in)
+	{
+		std::cerr << "Failed to open profile import path: " << path << std::endl;
+		return false;
+	}
+
+	try
+	{
+		ParseProfile(ctx, in);
+		InvalidateAppliedDriverState();
+		SaveProfile(ctx);
+		std::cout << "Imported profile from " << path << std::endl;
+		return ctx.validProfile;
+	}
+	catch (const std::runtime_error &e)
+	{
+		std::cerr << "Error importing profile: " << e.what() << std::endl;
+		return false;
+	}
 }

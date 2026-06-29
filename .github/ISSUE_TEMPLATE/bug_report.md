@@ -1,14 +1,33 @@
 ---
 name: Bug report
-about: Something is broken
+about: Tracking, calibration, install, or crash
 title: ''
 labels: bug
 assignees: ''
-
 ---
 
-<!--
-If you are having trouble setting this up with SteamVR and would like help, the fastest way is to ask in the Discord group. https://discord.com/invite/m7g2Wyj
+**Version:** (Settings tab, e.g. 8.0.0)
 
-If you are having issues after updating SteamVR, please check for a new release at https://github.com/pushrax/OpenVR-SpaceCalibrator/releases before posting an issue.
--->
+**Setup:**
+- HMD / streamer (VD, ALVR, etc.):
+- Trackers:
+- SteamVR version:
+
+**Steps to reproduce:**
+
+**Expected:**
+
+**Actual:**
+
+**Diagnostics tab** (copy text or screenshot):
+- Pose hooks:
+- Driver override:
+- Override:
+- IPC:
+
+**Scripts output** (if possible):
+```
+.\scripts\debug-steamvr.ps1
+```
+
+**Driver log** (last ~30 lines from `SteamVR\space_calibrator_driver.log` or `%LOCALAPPDATA%\openvr\logs\`):

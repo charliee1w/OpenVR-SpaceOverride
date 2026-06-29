@@ -2,17 +2,19 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #ifndef _OPENVR_API
 #include <openvr_driver.h>
 #endif
 
-#define OPENVR_SPACECALIBRATOR_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceOverrideCom"
+#define OPENVR_SPACEOVERRIDE_PIPE_NAME "\\\\.\\pipe\\OpenVRSpaceOverrideCom"
 
 namespace protocol
 {
-	const uint32_t Version = 5;
+	constexpr uint32_t Version = 9;
+	constexpr uint32_t MaxTrackedDevices = 64;
 
 	enum RequestType
 	{
@@ -22,6 +24,9 @@ namespace protocol
 		RequestSetHmdTracker,
 		RequestSetSlamSync,
 		RequestSetOneEuro,
+		RequestGetPredictionTelemetry,
+		RequestGetDriverTelemetry,
+		RequestApplyBatch,
 	};
 
 	enum ResponseType
@@ -29,6 +34,28 @@ namespace protocol
 		ResponseInvalid,
 		ResponseHandshake,
 		ResponseSuccess,
+		ResponseError,
+		ResponsePredictionTelemetry,
+		ResponseDriverTelemetry,
+	};
+
+	enum IpcErrorCode : uint32_t
+	{
+		IpcErrorNone = 0,
+		IpcErrorInvalidRequest,
+		IpcErrorInvalidDeviceIndex,
+		IpcErrorInvalidTransform,
+		IpcErrorBatchTruncated,
+		IpcErrorBatchPartialFailure,
+	};
+
+	enum DriverOverrideInactiveReason : uint8_t
+	{
+		DriverOverrideActive = 0,
+		DriverOverrideDisabled,
+		DriverOverrideHooksMissing,
+		DriverOverrideTrackerInvalid,
+		DriverOverrideTrackerLost,
 	};
 
 	struct Protocol
@@ -46,6 +73,10 @@ namespace protocol
 		vr::HmdVector3d_t translation;
 		vr::HmdQuaternion_t rotation;
 		double scale;
+
+		SetDeviceTransform() :
+			openVRID(0), enabled(false), updateTranslation(false), updateRotation(false), updateScale(false),
+			translation{}, rotation{ 1, 0, 0, 0 }, scale(1.0) {}
 
 		SetDeviceTransform(uint32_t id, bool enabled) :
 			openVRID(id), enabled(enabled), updateTranslation(false), updateRotation(false), updateScale(false) { }
@@ -75,6 +106,7 @@ namespace protocol
 		bool slamFallback;
 		bool enableAngularVelocity;
 		float predictionTime;
+		bool predictionAuto;
 		vr::HmdQuaternion_t offsetRotation;
 		vr::HmdVector3d_t offsetTranslation;
 		vr::HmdQuaternion_t calibrationRotation;
@@ -101,6 +133,47 @@ namespace protocol
 		OneEuroParams drift;
 	};
 
+	struct PredictionTelemetry
+	{
+		bool valid;
+		float estimatedLagMs;
+		float estimatedLagFrames;
+		float appliedPredictionFrames;
+		float displayHz;
+	};
+
+	struct DriverTelemetry
+	{
+		bool valid = false;
+		bool overrideEnabled = false;
+		bool overrideActive = false;
+		DriverOverrideInactiveReason overrideInactiveReason = DriverOverrideDisabled;
+		bool poseHooksInstalled = false;
+		bool trackerValid = false;
+		float trackerLostSeconds = 0.0f;
+		float driftYawDeg = 0.0f;
+		float driftTranslationMm = 0.0f;
+		float appliedPredictionFrames = 0.0f;
+		float displayHz = 90.0f;
+		bool driftValid = false;
+		bool trackerBlendActive = false;
+	};
+
+	struct ApplyBatch
+	{
+		uint32_t deviceTransformCount = 0;
+		SetDeviceTransform deviceTransforms[MaxTrackedDevices]{};
+
+		uint32_t slamSyncCount = 0;
+		SetSlamSync slamSync[MaxTrackedDevices]{};
+
+		bool applyHmdTracker = false;
+		SetHmdTracker hmdTracker{};
+
+		bool applyOneEuro = false;
+		SetOneEuro oneEuro{};
+	};
+
 	struct Request
 	{
 		RequestType type;
@@ -110,6 +183,7 @@ namespace protocol
 			SetHmdTracker setHmdTracker;
 			SetSlamSync setSlamSync;
 			SetOneEuro setOneEuro;
+			ApplyBatch applyBatch;
 		};
 
 		Request() : type(RequestInvalid) { }
@@ -122,9 +196,18 @@ namespace protocol
 
 		union {
 			Protocol protocol;
+			IpcErrorCode errorCode;
+			PredictionTelemetry predictionTelemetry;
+			DriverTelemetry driverTelemetry;
 		};
 
 		Response() : type(ResponseInvalid) { }
 		Response(ResponseType type) : type(type) { }
 	};
+
+	inline constexpr size_t IpcRequestSize = sizeof(Request);
+	inline constexpr size_t IpcResponseSize = sizeof(Response);
+
+	static_assert(IpcRequestSize > 0, "IPC request size must be non-zero");
+	static_assert(IpcResponseSize > 0, "IPC response size must be non-zero");
 }

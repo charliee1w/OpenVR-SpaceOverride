@@ -7,6 +7,7 @@
 #include <thread>
 #include <set>
 #include <mutex>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -49,6 +50,7 @@ private:
 	bool stop = false;
 
 	std::set<PipeInstance *> pipes;
+	std::mutex pipesMutex;
 	HANDLE connectEvent;
 
 	ServerTrackedDeviceProvider *driver;

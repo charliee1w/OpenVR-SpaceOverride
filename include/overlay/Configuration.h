@@ -6,3 +6,5 @@
 
 void LoadProfile(CalibrationContext &ctx);
 void SaveProfile(CalibrationContext &ctx);
+bool ExportProfileToFile(const CalibrationContext &ctx, const std::string &path);
+bool ImportProfileFromFile(CalibrationContext &ctx, const std::string &path);

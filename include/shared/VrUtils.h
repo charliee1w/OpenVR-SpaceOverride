@@ -6,6 +6,7 @@
 #include <span>
 #include <string>
 #include <stdexcept>
+#include <vector>
 
 #include <openvr.h>
 #include <SDL3/SDL.h>
@@ -111,8 +112,42 @@ class VrTrackedDeviceProperties {
         return value;
     }
 
-    // TODO: implement
-    // [[maybe_unused]] auto GetArray(const vr::ETrackedDeviceProperty property) -> void { }
+    [[maybe_unused]] auto GetFloatArray(const vr::ETrackedDeviceProperty property) const -> std::vector<float> {
+        vr::ETrackedPropertyError result = vr::TrackedProp_Success;
+        const uint32_t bytes = vr::VRSystem()->GetArrayTrackedDeviceProperty(
+            handle,
+            property,
+            vr::k_unFloatPropertyTag,
+            nullptr,
+            0,
+            &result);
+
+        if (result != vr::TrackedProp_BufferTooSmall || bytes == 0)
+            throw std::runtime_error(std::format(
+                "Failed to query float array size for prop \"{}\" on {} (err={})",
+                static_cast<int>(property),
+                static_cast<int>(handle),
+                static_cast<int>(result)));
+
+        std::vector<float> values(bytes / sizeof(float));
+        const uint32_t written = vr::VRSystem()->GetArrayTrackedDeviceProperty(
+            handle,
+            property,
+            vr::k_unFloatPropertyTag,
+            values.data(),
+            bytes,
+            &result);
+
+        if (result != vr::TrackedProp_Success || written != bytes)
+            throw std::runtime_error(std::format(
+                "Failed to read float array prop \"{}\" for {} (err={}, wrote={})",
+                static_cast<int>(property),
+                static_cast<int>(handle),
+                static_cast<int>(result),
+                written));
+
+        return values;
+    }
 
   private:
     explicit VrTrackedDeviceProperties(const vr::TrackedDeviceIndex_t handle) : handle{handle} {}

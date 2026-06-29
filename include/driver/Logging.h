@@ -13,15 +13,18 @@ void CloseLogFile();
 tm TimeForLog();
 void LogFlush();
 
+inline FILE* LogOutput()
+{
+	return LogFile ? LogFile : stderr;
+}
+
 #ifndef LOG
 #define LOG(fmt, ...) do { \
 	tm logNow = TimeForLog(); \
-	fprintf(LogFile, "[%02d:%02d:%02d] " fmt "\n", logNow.tm_hour, logNow.tm_min, logNow.tm_sec, __VA_ARGS__); \
+	fprintf(LogOutput(), "[%02d:%02d:%02d] " fmt "\n", logNow.tm_hour, logNow.tm_min, logNow.tm_sec, ##__VA_ARGS__); \
 	LogFlush(); \
 } while (0)
 #endif
-
-#define TRACE(...) {}
 
 #ifndef TRACE
 #define TRACE LOG

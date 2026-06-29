@@ -17,15 +17,45 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # issues originating from external sources (e.g. SteamVR). Defaults on.
 option(ENABLE_VULKAN_VALIDATION "Enable Vulkan validation layers" OFF)
 
+option(BUILD_OVERLAY "Build OpenVR-SpaceOverride overlay executable" ON)
+option(BUILD_DRIVER "Build driver_spaceoverride DLL" ON)
+
 set(OpenVR_ROOT ${CMAKE_SOURCE_DIR}/3rdparty/OpenVR)
 
-find_package(OpenVR REQUIRED)
+if(BUILD_OVERLAY OR BUILD_DRIVER)
+    find_package(OpenVR REQUIRED)
+endif()
 
-# Include rest of the CMake bindings
 add_subdirectory(3rdparty)
 
 message(STATUS "ENABLE_VULKAN_VALIDATION = ${ENABLE_VULKAN_VALIDATION}")
 
+add_library(calibration_math STATIC
+    "src/calibration/Math.cpp"
+    "src/calibration/Drift.cpp"
+    "src/calibration/PoseBlend.cpp"
+    "src/calibration/PredictionLag.cpp"
+)
+
+target_compile_features(calibration_math PUBLIC cxx_std_20)
+
+target_include_directories(calibration_math
+    PUBLIC
+        "${CMAKE_SOURCE_DIR}/include"
+)
+
+target_compile_definitions(calibration_math
+    PUBLIC
+        _HAS_DEPRECATED_NEGATORS=1
+        _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+)
+
+target_link_libraries(calibration_math
+    PUBLIC
+        Eigen
+)
+
+if(BUILD_OVERLAY)
 add_executable(OpenVR-SpaceOverride
     "src/overlay/Main.cpp"
     "src/overlay/VulkanRenderer.cpp"
@@ -71,8 +101,11 @@ target_link_libraries(OpenVR-SpaceOverride
         ImGui
         Eigen
         PicoJSON
+        calibration_math
 )
+endif()
 
+if(BUILD_DRIVER)
 add_library(driver_spaceoverride SHARED
     "src/driver/Main.cpp"
     "src/driver/ServerTrackedDeviceProvider.cpp"
@@ -92,7 +125,42 @@ target_include_directories(driver_spaceoverride PRIVATE
 target_link_libraries(driver_spaceoverride PRIVATE
     OpenVR::Driver
     MinHook
+    calibration_math
 )
 
 set_property(TARGET driver_spaceoverride PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 set_target_properties(driver_spaceoverride PROPERTIES PREFIX "")
+endif()
+
+option(BUILD_TESTS "Build calibration unit tests" ON)
+
+if(BUILD_TESTS)
+    include(FetchContent)
+    FetchContent_Declare(
+        Catch2
+        GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+        GIT_TAG v3.5.4
+    )
+    FetchContent_MakeAvailable(Catch2)
+
+    add_executable(calibration_math_test
+        "tests/calibration_math_test.cpp"
+    )
+
+    target_compile_features(calibration_math_test PRIVATE cxx_std_20)
+
+    target_compile_definitions(calibration_math_test
+        PRIVATE
+            _HAS_DEPRECATED_NEGATORS=1
+            _SILENCE_ALL_CXX17_DEPRECATION_WARNINGS
+    )
+
+    target_link_libraries(calibration_math_test
+        PRIVATE
+            calibration_math
+            Catch2::Catch2WithMain
+    )
+
+    enable_testing()
+    add_test(NAME calibration_math_test COMMAND calibration_math_test)
+endif()

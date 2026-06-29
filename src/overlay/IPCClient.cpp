@@ -20,8 +20,19 @@ static std::string LastErrorString(DWORD lastError)
 
 IPCClient::~IPCClient()
 {
+	Disconnect();
+}
+
+bool IPCClient::IsConnected() const
+{
+	return pipe != INVALID_HANDLE_VALUE && pipe != nullptr;
+}
+
+void IPCClient::Disconnect()
+{
 	if (pipe && pipe != INVALID_HANDLE_VALUE)
 		CloseHandle(pipe);
+	pipe = INVALID_HANDLE_VALUE;
 }
 
 void IPCClient::Connect()
@@ -38,9 +49,7 @@ void IPCClient::Connect()
 		}
 		catch (const std::runtime_error& e)
 		{
-			if (pipe && pipe != INVALID_HANDLE_VALUE)
-				CloseHandle(pipe);
-			pipe = INVALID_HANDLE_VALUE;
+			Disconnect();
 
 			if (attempt >= 3)
 				throw;
@@ -52,17 +61,39 @@ void IPCClient::Connect()
 	}
 }
 
+void IPCClient::EnsureConnected()
+{
+	if (!IsConnected())
+		Connect();
+}
+
 protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 {
-	Send(request);
-	return Receive();
+	for (int attempt = 0; attempt < 2; ++attempt)
+	{
+		try
+		{
+			EnsureConnected();
+			Send(request);
+			return Receive();
+		}
+		catch (const std::runtime_error& e)
+		{
+			fprintf(stderr, "IPC send failed (attempt %d/2): %s\n", attempt + 1, e.what());
+			Disconnect();
+			if (attempt >= 1)
+				throw;
+		}
+	}
+
+	throw std::runtime_error("IPC send failed after reconnect");
 }
 
 void IPCClient::Send(const protocol::Request &request)
 {
 	DWORD bytesWritten;
-	BOOL success = WriteFile(pipe, &request, sizeof request, &bytesWritten, 0);
-	if (!success)
+	BOOL success = WriteFile(pipe, &request, protocol::IpcRequestSize, &bytesWritten, 0);
+	if (!success || bytesWritten != protocol::IpcRequestSize)
 	{
 		throw std::runtime_error("Error writing IPC request. Error: " + LastErrorString(GetLastError()));
 	}
@@ -73,7 +104,7 @@ protocol::Response IPCClient::Receive()
 	protocol::Response response(protocol::ResponseInvalid);
 	DWORD bytesRead;
 
-	BOOL success = ReadFile(pipe, &response, sizeof response, &bytesRead, 0);
+	BOOL success = ReadFile(pipe, &response, protocol::IpcResponseSize, &bytesRead, 0);
 	if (!success)
 	{
 		DWORD lastError = GetLastError();
@@ -83,7 +114,7 @@ protocol::Response IPCClient::Receive()
 		}
 	}
 
-	if (bytesRead != sizeof response)
+	if (bytesRead != protocol::IpcResponseSize)
 	{
 		throw std::runtime_error("Invalid IPC response with size " + std::to_string(bytesRead));
 	}
@@ -93,12 +124,12 @@ protocol::Response IPCClient::Receive()
 
 void IPCClient::ConnectInternal()
 {
-	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
+	LPCTSTR pipeName = TEXT(OPENVR_SPACEOVERRIDE_PIPE_NAME);
 	WaitNamedPipe(pipeName, 1000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 	if (pipe == INVALID_HANDLE_VALUE)
 	{
-		throw std::runtime_error("Space Override driver unavailable. Make sure SteamVR is running, and the Space Calibrator addon is enabled in SteamVR settings.");
+		throw std::runtime_error("Space Override driver unavailable. Ensure SteamVR is running and the spaceoverride driver is enabled.");
 	}
 
 	DWORD mode = PIPE_READMODE_MESSAGE;

@@ -1,5 +1,5 @@
 {
-	"alwaysActivate": true,
+	"alwaysActivate": false,
 	"name": "spaceoverride",
 	"directory": "",
 	"resourceOnly": false

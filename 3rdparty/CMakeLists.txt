@@ -10,6 +10,7 @@ set(Eigen_ROOT ${thirdparty_ROOT}/Eigen)
 set(PicoJson_ROOT ${thirdparty_ROOT}/PicoJSON)
 set(MinHook_ROOT ${thirdparty_ROOT}/MinHook)
 
+if(BUILD_OVERLAY)
 find_package(Vulkan REQUIRED)
 
 # Make sure SDL is built static, not shared.
@@ -35,6 +36,7 @@ add_library(ImGui STATIC
 
 target_include_directories(ImGui PUBLIC ${ImGui_ROOT} ${CMAKE_SOURCE_DIR}/src/overlay/ImGui)
 target_link_libraries(ImGui PUBLIC SDL3::SDL3 vulkan OpenVR::API)
+endif()
 
 add_library(Eigen INTERFACE)
 
@@ -45,7 +47,8 @@ add_library(PicoJSON INTERFACE)
 
 target_include_directories(PicoJSON INTERFACE ${PicoJson_ROOT})
 
-# TODO replace MinHook with rtmp or other library when targeting Linux :p
+# MinHook — Windows driver hook only (see AGENTS.md SteamVR hook compatibility).
+if(BUILD_DRIVER)
 add_library(MinHook STATIC
     ${MinHook_ROOT}/src/hde/hde32.c
 	${MinHook_ROOT}/src/hde/hde64.c
@@ -55,3 +58,4 @@ add_library(MinHook STATIC
 )
 
 target_include_directories(MinHook PUBLIC ${MinHook_ROOT}/include)
+endif()

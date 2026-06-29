@@ -6,6 +6,10 @@
 #include "OneEuroFilter.h"
 
 #include <openvr_driver.h>
+#include <atomic>
+#include <deque>
+#include <mutex>
+#include <vector>
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
@@ -22,7 +26,7 @@ public:
 	virtual const char * const *GetInterfaceVersions() { return vr::k_InterfaceVersions; }
 
 	/** Allows the driver do to some work in the main loop of the server. */
-	virtual void RunFrame() { }
+	virtual void RunFrame() override;
 
 	/** Returns true if the driver wants to block Standby mode. */
 	virtual bool ShouldBlockStandbyMode() { return false; }
@@ -38,10 +42,12 @@ public:
 	////// End vr::IServerTrackedDeviceProvider functions
 
 	ServerTrackedDeviceProvider() : server(this) { }
-	void SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
-	void SetHmdTracker(const protocol::SetHmdTracker &cmd);
-	void SetSlamSync(const protocol::SetSlamSync &cmd);
-	void SetOneEuro(const protocol::SetOneEuro &cmd);
+	bool SetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
+	bool SetHmdTracker(const protocol::SetHmdTracker &cmd);
+	bool SetSlamSync(const protocol::SetSlamSync &cmd);
+	bool SetOneEuro(const protocol::SetOneEuro &cmd);
+	protocol::PredictionTelemetry GetPredictionTelemetry() const;
+	protocol::DriverTelemetry GetDriverTelemetry() const;
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
@@ -50,6 +56,9 @@ private:
 	void ApplyDrift(vr::DriverPose_t &pose) const;
 
 	IPCServer server;
+	mutable std::mutex stateMutex;
+	std::atomic<bool> poseWorkActive{ false };
+	void RecomputePoseWorkActive();
 
 	struct DeviceTransform
 	{
@@ -65,9 +74,11 @@ private:
 	{
 		bool enabled = false;
 		bool native = false;
-		bool slamFallback = true;
+		bool slamFallback = false;
 		bool enableAngularVelocity = false;
 		float predictionTime = 1.0f;
+		float manualPredictionTime = 1.0f;
+		bool predictionAuto = false;
 		uint32_t hmdID = vr::k_unTrackedDeviceIndex_Hmd;
 		uint32_t trackerID = vr::k_unTrackedDeviceIndexInvalid;
 		vr::HmdQuaternion_t offsetRotation = { 1, 0, 0, 0 };
@@ -99,4 +110,94 @@ private:
 
 		void reset() { valid = false; rotationFilter.reset(); translationFilter.reset(); }
 	} headFilter;
+
+	struct HmdPoseSample
+	{
+		bool valid = false;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		double position[3] = { 0, 0, 0 };
+	};
+
+	struct TrackerBlendState
+	{
+		bool active = false;
+		bool trackerWasValid = false;
+		bool hasEmittedPose = false;
+		HmdPoseSample emittedPose;
+
+		enum class Mode
+		{
+			ToTracker,
+			ToSlam,
+		};
+		Mode mode = Mode::ToTracker;
+
+		double durationSec = 0.4;
+		LARGE_INTEGER startTime = {};
+		bool timePrimed = false;
+
+		HmdPoseSample fromPose;
+		HmdPoseSample toPose;
+
+		void reset()
+		{
+			active = false;
+			trackerWasValid = false;
+			hasEmittedPose = false;
+			emittedPose = {};
+			timePrimed = false;
+			startTime = {};
+			fromPose = {};
+			toPose = {};
+		}
+	} trackerBlend;
+
+	struct PredictionAutoTune
+	{
+		static constexpr std::size_t MaxSamples = 200;
+		static constexpr double WindowSec = 2.0;
+		static constexpr double MinAngSpeed = 0.35;
+		static constexpr double MinLinSpeed = 0.15;
+
+		std::deque<double> trackerSamples;
+		std::deque<double> slamSamples;
+		std::deque<double> trackerLinSamples;
+		std::deque<double> slamLinSamples;
+		std::deque<double> sampleTimes;
+
+		bool estimateValid = false;
+		float estimatedLagFrames = 0.0f;
+		float estimatedLagMs = 0.0f;
+		float appliedPredictionFrames = 1.0f;
+		float displayHz = 90.0f;
+
+		void reset()
+		{
+			trackerSamples.clear();
+			slamSamples.clear();
+			trackerLinSamples.clear();
+			slamLinSamples.clear();
+			sampleTimes.clear();
+			estimateValid = false;
+			estimatedLagFrames = 0.0f;
+			estimatedLagMs = 0.0f;
+			appliedPredictionFrames = 1.0f;
+		}
+	} predictionTune;
+
+	struct TrackerHealth
+	{
+		bool poseValid = false;
+		double lastValidQpc = 0.0;
+	} trackerHealth;
+
+	float EffectivePredictionFrames() const;
+	void RecordPredictionSample(double timeSec, float trackerAngSpeed, float slamAngSpeed, float trackerLinSpeed, float slamLinSpeed);
+	void UpdatePredictionAutoTune();
+	void UpdateDisplayHz();
+	void BeginTrackerBlend(TrackerBlendState::Mode mode, const HmdPoseSample& fromPose, const HmdPoseSample& toPose, double durationSec);
+	HmdPoseSample ResolveBlendedHmdPose(bool trackerValid, const HmdPoseSample& trackerPose, const HmdPoseSample& slamPose, bool slamPoseValid);
+	HmdPoseSample BuildTrackerHmdPose(const vr::TrackedDevicePose_t& tp) const;
+	HmdPoseSample BuildSlamHmdPose(const vr::DriverPose_t& pose, bool valid) const;
+	void WriteHmdPoseToDriver(vr::DriverPose_t& pose, const HmdPoseSample& hmdPose, const vr::TrackedDevicePose_t* trackerPose);
 };

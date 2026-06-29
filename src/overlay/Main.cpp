@@ -112,7 +112,7 @@ static auto CreateNotificationOverlay() -> void
     vr::VROverlay()->SetOverlayTransformTrackedDeviceRelative(g_notifyOverlayHandle, vr::k_unTrackedDeviceIndex_Hmd, &m);
 }
 
-static auto ShowNotification(const char* text) -> vr::VRNotificationId
+auto ShowCalibrationNotification(const char* text) -> vr::VRNotificationId
 {
     if (g_notifyOverlayHandle == vr::k_ulOverlayHandleInvalid)
         return 0;
@@ -255,24 +255,44 @@ int main(int argc, char** argv)
                 }
                 case vr::VREvent_TrackedDeviceUserInteractionStarted:
                 {
-                    auto activityLevel = vr::VRSystem()->GetTrackedDeviceActivityLevel(CalCtx.targetID);
-                    if ((activityLevel == vr::k_EDeviceActivityLevel_UserInteraction || activityLevel == vr::k_EDeviceActivityLevel_UserInteraction_Timeout) && g_tracking_lost) {
-                        if (SDL_GetTicks() - g_tracking_lost_time >= (30 * 1000)) {
-                            CalCtx.Clear();
-                            std::thread([]() {
-                                std::this_thread::sleep_for(3000ms);
-                                CalCtx.notificationId = ShowNotification("Tracking lost - Currently recalibrating, please follow the calibration instructions.\n\nLook left, Look center, Look right, Look center, Look up, Look center.");
-                                StartCalibration();
-                            }).detach();
+                    if (!g_tracking_lost)
+                        break;
+
+                    const uint32_t lostMs = SDL_GetTicks() - (uint32_t)g_tracking_lost_time;
+                    constexpr uint32_t partialMinMs = 30 * 1000;
+                    constexpr uint32_t fullOfferMs = 5 * 60 * 1000;
+
+                    if (lostMs >= partialMinMs && lostMs < fullOfferMs && CalCtx.validProfile)
+                    {
+                        if (CalCtx.notificationId != 0)
+                        {
+                            vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);
+                            CalCtx.notificationId = 0;
                         }
-                        g_tracking_lost = false;
+                        StartPartialRecalibration();
+                        CalCtx.notificationId = ShowCalibrationNotification(
+                            "Headset tracker recovered — re-estimating mount offset.\n"
+                            "Hold still or move smoothly for a few seconds.");
                     }
+                    else if (lostMs >= fullOfferMs)
+                    {
+                        if (CalCtx.notificationId != 0)
+                        {
+                            vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);
+                            CalCtx.notificationId = 0;
+                        }
+                        CalCtx.notificationId = ShowCalibrationNotification(
+                            "Headset tracker was lost for a long time.\n"
+                            "Open Space Override and press Calibrate for a full recalibration.");
+                    }
+
+                    g_tracking_lost = false;
                     break;
                 }
                 case vr::VREvent_TrackedDeviceUserInteractionEnded:
                 {
                     auto activityLevel = vr::VRSystem()->GetTrackedDeviceActivityLevel(CalCtx.targetID);
-                    if (activityLevel == vr::k_EDeviceActivityLevel_Idle && CalCtx.enabled && !g_tracking_lost) {
+                    if (activityLevel == vr::k_EDeviceActivityLevel_Idle && CalCtx.validProfile && !g_tracking_lost) {
                         g_tracking_lost = true;
                         g_tracking_lost_time = SDL_GetTicks();
                     }
@@ -284,7 +304,6 @@ int main(int argc, char** argv)
                     [[fallthrough]];
                 case vr::VREvent_RestartRequested:
                 {
-                    CalCtx.Clear();
                     vr::VRSystem()->AcknowledgeQuit_Exiting();
                     g_ticking = false;
                     break;

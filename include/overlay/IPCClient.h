@@ -12,6 +12,10 @@ public:
 	~IPCClient();
 
 	void Connect();
+	bool IsConnected() const;
+	void Disconnect();
+	void EnsureConnected();
+
 	protocol::Response SendBlocking(const protocol::Request &request);
 
 	void Send(const protocol::Request &request);

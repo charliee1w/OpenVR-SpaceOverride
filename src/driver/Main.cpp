@@ -18,7 +18,8 @@ ServerTrackedDeviceProvider g_server;
 
 EXPORT_FUNC void* HmdDriverFactory(const char *pInterfaceName, int *pReturnCode)
 {
-	TRACE("HmdDriverFactory(%s)", pInterfaceName);
+	OpenLogFile();
+	TRACE("HmdDriverFactory(%s)", pInterfaceName ? pInterfaceName : "(null)");
 
 	if (std::strcmp(vr::IServerTrackedDeviceProvider_Version, pInterfaceName) == 0)
 	{

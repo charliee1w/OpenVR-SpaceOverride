@@ -9,6 +9,7 @@
 #include <iostream>
 
 #include "Protocol.h"
+#include "FilterDefaults.h"
 
 enum class CalibrationState
 {
@@ -16,7 +17,26 @@ enum class CalibrationState
 	Begin,
 	Detect,
 	Sampling,
+	PartialSampling,
+	Recovering,
 	Editing,
+};
+
+enum class OverrideInactiveReason
+{
+	Active,
+	NoProfile,
+	TrackerMissing,
+	TrackerSerialAmbiguous,
+	HmdSerialMismatch,
+	HmdTrackingSystemMismatch,
+	InvalidRelativeOffset,
+};
+
+struct OverrideStatus
+{
+	bool active = false;
+	OverrideInactiveReason inactiveReason = OverrideInactiveReason::NoProfile;
 };
 
 struct CalibrationContext
@@ -35,22 +55,51 @@ struct CalibrationContext
 	std::string targetTrackingSystem;
 
 	std::string hmdSerial;
+	std::string hmdTrackingSystem;
 	std::string trackerSerial;
+	std::string preferredTrackerSerial;
 
 	bool enabled = false;
 	bool validProfile = false;
-	double timeLastTick = 0, timeLastScan = 0;
+	double timeLastTick = 0, timeLastScan = 0, timeLastTelemetryFetch = 0, timeLastIpcHealthCheck = 0;
 	double wantedUpdateInterval = 1.0;
 
 	bool enableNative = false;
-	bool fallbackToSlam = true;
+	bool fallbackToSlam = false;
 	bool enableAngularVelocity = false;
-	bool continuousSync = true;
+	bool continuousSync = false;
+	bool syncHmdDrift = false;
 	float predictionTime = 1.0f;
+	bool predictionAuto = false;
+	float predictionLagMs = 0.0f;
+	float predictionLagFrames = 0.0f;
+	float autoPredictionFrames = 1.0f;
+	bool predictionTelemetryValid = false;
+	bool driverTelemetryValid = false;
+	bool ipcHealthy = true;
+	protocol::DriverTelemetry driverTelemetry{};
 
-	bool headFilterEnabled = false;
-	protocol::OneEuroParams headFilterParams = { 5.0, 0.8, 1.0 };
-	protocol::OneEuroParams driftFilterParams = { 3.0, 1.3, 0.6 };
+	double lastCalibrationTime = 0.0;
+	double timeLastDriverTelemetryFetch = 0.0;
+
+	bool liveCalibrationQualityValid = false;
+	double liveCalibrationRmsMm = 0.0;
+	bool trackerIsTundra = false;
+
+	bool runtimeResidualValid = false;
+	double runtimeResidualMm = 0.0;
+	bool guardianShiftSuspect = false;
+	double guardianShiftSlamJumpMm = 0.0;
+	bool mountRigidityWarning = false;
+	double baselineMountRmsMm = 0.0;
+	double lastPartialMountRmsMm = 0.0;
+	double timeLastRuntimeQualityUpdate = 0.0;
+
+	bool headFilterEnabled = true;
+	protocol::OneEuroParams headFilterParams = filter_defaults::Head;
+	protocol::OneEuroParams driftFilterParams = filter_defaults::Drift;
+
+	OverrideStatus overrideStatus;
 
 	vr::VRNotificationId notificationId = 0;
 
@@ -88,11 +137,37 @@ struct CalibrationContext
 		validRelativeOffset = false;
 		targetTrackingSystem = "";
 		hmdSerial = "";
+		hmdTrackingSystem = "";
 		trackerSerial = "";
 		enabled = false;
 		validProfile = false;
-		continuousSync = true;
+		fallbackToSlam = false;
+		continuousSync = false;
+		syncHmdDrift = false;
+		overrideStatus = {};
+		calibrationFailureOffer = false;
+		lastCalibrationRmsMm = 0.0;
+		baselineMountRmsMm = 0.0;
+		lastPartialMountRmsMm = 0.0;
+		runtimeResidualValid = false;
+		runtimeResidualMm = 0.0;
+		guardianShiftSuspect = false;
+		guardianShiftSlamJumpMm = 0.0;
+		mountRigidityWarning = false;
 	}
+
+	static constexpr size_t PartialSampleCount = 40;
+	static constexpr double PartialMountRmsThresholdMeters = 0.03;
+	static constexpr double FullCalibrationRmsThresholdMeters = 0.1;
+	static constexpr int MaxCalibrationAutoAttempts = 3;
+	static constexpr size_t LiveQualityMinSamples = 8;
+	static constexpr double TundraJitterWarnThresholdMeters = 0.012;
+	static constexpr double RuntimeResidualWarnMm = 30.0;
+	static constexpr double MountRigidityWarnRatio = 1.5;
+	static constexpr double MountRigidityWarnMinDeltaMm = 5.0;
+
+	bool calibrationFailureOffer = false;
+	double lastCalibrationRmsMm = 0.0;
 
 	size_t SampleCount()
 	{
@@ -148,6 +223,20 @@ extern CalibrationContext CalCtx;
 void InitCalibrator();
 void CalibrationTick(double time);
 void StartCalibration();
+void RetryCalibrationAfterFailure();
+void RestoreCalibrationAfterFailure();
+const char* CalibrationSpeedName(CalibrationContext::Speed speed);
+void StartPartialRecalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
 void SendOneEuroParams();
+void FetchPredictionTelemetry();
+void FetchDriverTelemetry();
+void InvalidateAppliedDriverState();
+void ApplyRuntimeDriverSettings(double timeSec);
+void UpdateRuntimeTrackingQuality(CalibrationContext& ctx);
+OverrideStatus EvaluateOverrideStatus(const CalibrationContext& ctx);
+const char* OverrideInactiveReasonText(OverrideInactiveReason reason);
+const char* DriverOverrideInactiveReasonText(protocol::DriverOverrideInactiveReason reason);
+bool IsStageTrackingSpace();
+vr::VRNotificationId ShowCalibrationNotification(const char* text);

@@ -6,5 +6,8 @@
 
 static void DetourTrackedDevicePoseUpdated(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t & newPose, uint32_t unPoseStructSize);
 
-void InjectHooks(vr::IVRDriverContext *pDriverContext);
+bool InjectHooks(vr::IVRDriverContext *pDriverContext);
 void DisableHooks();
+bool PoseHooksInstalled();
+void SetDriverShuttingDown(bool shuttingDown);
+bool IsDriverShuttingDown();
