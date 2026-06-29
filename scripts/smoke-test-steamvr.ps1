@@ -98,7 +98,7 @@ else {
 
 Write-Host ""
 if ($failures.Count -gt 0) {
-    Write-Host "SMOKE TEST FAILED ($($failures.Count) issue(s)):" -ForegroundColor Red
+    Write-Host "SMOKE TEST FAILED ($($failures.Count) issues):" -ForegroundColor Red
     $failures | ForEach-Object { Write-Host "  - $_" }
     exit 1
 }

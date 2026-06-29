@@ -25,11 +25,11 @@ Write-Host ""
 # 1. SteamVR running
 $vr = Get-Process -Name vrserver,vrcompositor -ErrorAction SilentlyContinue
 if ($vr) {
-    Write-Host "[WARN] SteamVR is running — restart after deploy to load new driver DLL" -ForegroundColor Yellow
+    Write-Host '[WARN] SteamVR is running - restart after deploy to load new driver DLL' -ForegroundColor Yellow
     $vr | ForEach-Object { Write-Host "       $($_.Name) pid=$($_.Id)" }
 }
 else {
-    Write-Host "[OK]   SteamVR not running" -ForegroundColor Green
+    Write-Host '[OK]   SteamVR not running' -ForegroundColor Green
 }
 
 # 2. Artifact hashes
@@ -45,7 +45,7 @@ if ($buildDriverHash -eq $steamDriverHash) {
     Write-Host "[OK]   Driver DLL matches build ($buildDriverHash)" -ForegroundColor Green
 }
 else {
-    Write-Host "[FAIL] Driver DLL stale or missing" -ForegroundColor Red
+    Write-Host '[FAIL] Driver DLL stale or missing' -ForegroundColor Red
     Write-Host "       build: $BuildDriver -> $buildDriverHash"
     Write-Host "       steam: $SteamDriver -> $steamDriverHash"
 }
@@ -54,7 +54,7 @@ if ($buildOverlayHash -eq $pfOverlayHash) {
     Write-Host "[OK]   Program Files overlay matches build ($buildOverlayHash)" -ForegroundColor Green
 }
 else {
-    Write-Host "[FAIL] Program Files overlay STALE — SteamVR autolaunch uses old EXE" -ForegroundColor Red
+    Write-Host '[FAIL] Program Files overlay STALE - SteamVR autolaunch uses old EXE' -ForegroundColor Red
     Write-Host "       build:     $buildOverlayHash ($(if (Test-Path $BuildOverlay) { (Get-Item $BuildOverlay).LastWriteTime }))"
     Write-Host "       PF install: $pfOverlayHash ($(if (Test-Path $PfOverlay) { (Get-Item $PfOverlay).LastWriteTime }))"
     Write-Host "       Fix: re-run deploy-steamvr.ps1 as Administrator"
@@ -78,13 +78,13 @@ try {
         if ($config -match '"rel_qw"') { Write-Host "       contains mount offset" }
     }
     else {
-        Write-Host "[FAIL] Profile EMPTY — override inactive until calibration" -ForegroundColor Red
+        Write-Host '[FAIL] Profile EMPTY - override inactive until calibration' -ForegroundColor Red
         Write-Host "       Cause: likely wiped by pre-fix quit bug, or never calibrated"
         Write-Host "       Fix: run Calibrate in overlay, or Import profile JSON in Settings > Diagnostics"
     }
 }
 catch {
-    Write-Host "[FAIL] Registry key missing — no saved profile" -ForegroundColor Red
+    Write-Host '[FAIL] Registry key missing - no saved profile' -ForegroundColor Red
 }
 
 # 4. Driver logs
@@ -96,14 +96,19 @@ foreach ($log in $Logs) {
     $color = if ($sizeMb -gt 100) { "Yellow" } else { "Gray" }
     Write-Host "[$sizeMb MB] $log" -ForegroundColor $color
 
-    $hook = Select-String -Path $log -Pattern "Enabled hook for IVRServerDriverHost" | Select-Object -Last 1
-    $ipcErr = Select-String -Path $log -Pattern "CreateNamedPipe failed|Error: 231|ResponseError" | Select-Object -Last 3
-    $loaded = Select-String -Path $log -Pattern "OpenVR-SpaceOverride \d+ loaded" | Select-Object -Last 1
+    if ($sizeMb -gt 100) {
+        Write-Host "       WARN oversized log - run scripts/prune-driver-log.ps1 (SteamVR stopped)" -ForegroundColor Yellow
+    }
+
+    $tail = Get-Content $log -Tail 200 -ErrorAction SilentlyContinue
+    $loaded = $tail | Select-String -Pattern 'OpenVR-SpaceOverride .+ loaded' | Select-Object -Last 1
+    $hook = $tail | Select-String -Pattern 'Enabled hook for IVRServerDriverHost' | Select-Object -Last 1
+    $ipcErr = $tail | Select-String -Pattern 'CreateNamedPipe failed|ResponseError' | Select-Object -Last 3
 
     if ($loaded) { Write-Host "       last load: $($loaded.Line.Trim())" }
     if ($hook) { Write-Host "       hooks: $($hook.Line.Trim())" -ForegroundColor Green }
     if ($ipcErr) {
-        Write-Host "       IPC issues:" -ForegroundColor Yellow
+        Write-Host "       recent IPC issues:" -ForegroundColor Yellow
         $ipcErr | ForEach-Object { Write-Host "         $($_.Line.Trim())" }
     }
 }

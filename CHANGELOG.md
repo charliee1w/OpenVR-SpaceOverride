@@ -2,6 +2,12 @@
 
 ## 8.1.0 — wireless feel pass (2026-06-29)
 
+### Logging
+- Driver log moved to `%LOCALAPPDATA%\openvr\logs\` (no more 10 GB files in `SteamVR\bin\win64`)
+- Runtime rotation at 50 MB (not only on driver load)
+- Rate-limited IPC connect/disconnect/pipe-busy log spam
+- `scripts/prune-driver-log.ps1` to remove legacy oversized logs
+
 ### Feel / prediction
 - Prediction auto-tune now allows up to 4 frames with a wireless stream bias (+0.75 frames)
 - Fallback prediction when auto-tune is warming up: 2 frames

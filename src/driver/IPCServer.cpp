@@ -230,7 +230,8 @@ void IPCServer::RunThread(IPCServer *_this)
 				}
 			}
 
-			LOG("IPC client connected");
+			if (LogRateLimited("IPC client connected", 5000))
+				LOG("IPC client connected");
 
 			auto pipeInst = _this->CreatePipeInstance(nextPipe);
 			CompletedWriteCallback(0, protocol::IpcResponseSize, (LPOVERLAPPED) pipeInst);
@@ -282,7 +283,8 @@ BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
 			continue;
 		}
 
-		LOG("CreateNamedPipe failed. Error: %d", err);
+		if (LogRateLimited("CreateNamedPipe", 10000))
+			LOG("CreateNamedPipe failed. Error: %d", err);
 		return FALSE;
 	}
 
@@ -323,9 +325,10 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	{
 		if (err == ERROR_BROKEN_PIPE)
 		{
-			LOG("IPC client disconnecting normally");
+			if (LogRateLimited("IPC disconnect normal read", 5000))
+				LOG("IPC client disconnecting normally");
 		}
-		else
+		else if (LogRateLimited("IPC disconnect read", 5000))
 		{
 			LOG("IPC client disconnecting due to error (via CompletedReadCallback), error: %d, bytesRead: %d", err, bytesRead);
 		}
@@ -351,7 +354,8 @@ void IPCServer::CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPP
 
 	if (!success)
 	{
-		LOG("IPC client disconnecting due to error (via CompletedWriteCallback), error: %d, bytesWritten: %d", err, bytesWritten);
+		if (LogRateLimited("IPC disconnect write", 5000))
+			LOG("IPC client disconnecting due to error (via CompletedWriteCallback), error: %d, bytesWritten: %d", err, bytesWritten);
 		pipeInst->server->ClosePipeInstance(pipeInst);
 	}
 }
