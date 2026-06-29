@@ -91,7 +91,7 @@ struct CalibrationContext
 	bool continuousSync = false;
 	bool syncHmdDrift = false;
 	float predictionTime = 1.0f;
-	bool predictionAuto = true;
+	bool predictionAuto = false;
 	float predictionLagMs = 0.0f;
 	float predictionLagFrames = 0.0f;
 	float autoPredictionFrames = 1.0f;
@@ -105,7 +105,8 @@ struct CalibrationContext
 
 	bool liveCalibrationQualityValid = false;
 	double liveCalibrationRmsMm = 0.0;
-	bool trackerIsTundra = false;
+	bool tundraMode = false;
+	bool trackerTundraDetected = false;
 
 	bool runtimeResidualValid = false;
 	double runtimeResidualMm = 0.0;
@@ -189,7 +190,7 @@ struct CalibrationContext
 	static constexpr int RuntimeResidualHighStreakThreshold = 15;
 	static constexpr double AutoPartialRecalCooldownSec = 300.0;
 
-	bool autoPartialRecalOnMountDrift = true;
+	bool autoPartialRecalOnMountDrift = false;
 	int runtimeResidualHighStreak = 0;
 	double timeLastAutoPartialRecal = 0.0;
 	static constexpr double MountRigidityWarnRatio = 1.5;
@@ -258,6 +259,7 @@ const char* CalibrationSpeedName(CalibrationContext::Speed speed);
 void StartPartialRecalibration();
 void LoadChaperoneBounds();
 void ApplyChaperoneBounds();
+void ApplyFilterPresetsFromModes(CalibrationContext& ctx);
 void SendOneEuroParams();
 void FetchPredictionTelemetry();
 void FetchDriverTelemetry();

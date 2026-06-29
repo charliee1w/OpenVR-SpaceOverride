@@ -248,16 +248,30 @@ static bool IsTundraTrackerModel(uint32_t deviceId)
 	return modelLower.find("tundra") != std::string::npos;
 }
 
-static void ApplyTundraFilterDefaultsIfNeeded(CalibrationContext& ctx, uint32_t trackerId)
+static void UpdateTrackerDetectionInfo(CalibrationContext& ctx, uint32_t trackerId)
 {
-	ctx.trackerIsTundra = IsTundraTrackerModel(trackerId);
-	if (!ctx.trackerIsTundra)
+	ctx.trackerTundraDetected = IsTundraTrackerModel(trackerId);
+	if (!ctx.trackerTundraDetected)
 		return;
 
 	char buf[256];
 	snprintf(buf, sizeof buf,
-		"Tundra tracker detected — enable smoothing in Settings if the mount looks shaky.\n");
+		"Tundra tracker detected — enable Tundra mode in Settings if the mount looks shaky.\n");
 	ctx.Log(buf);
+}
+
+void ApplyFilterPresetsFromModes(CalibrationContext& ctx)
+{
+	if (ctx.tundraMode)
+	{
+		ctx.headFilterParams = filter_defaults::TundraHead;
+		ctx.driftFilterParams = filter_defaults::TundraDrift;
+	}
+	else
+	{
+		ctx.headFilterParams = filter_defaults::Head;
+		ctx.driftFilterParams = filter_defaults::Drift;
+	}
 }
 
 static void UpdateLiveCalibrationQuality(CalibrationContext& ctx, const std::vector<calibration::Sample>& samples)
@@ -1081,7 +1095,7 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
 	ctx.Log(buf);
 
-	ApplyTundraFilterDefaultsIfNeeded(ctx, targetID);
+	UpdateTrackerDetectionInfo(ctx, targetID);
 
 	ResetAndDisableOffsets(targetID);
 	SendHmdTrackerCommand(vr::k_unTrackedDeviceIndex_Hmd, vr::k_unTrackedDeviceIndexInvalid, false);
@@ -1264,15 +1278,7 @@ static void FinishFullCalibration(CalibrationContext& ctx, std::vector<calibrati
 	ApplyRelativeOffset(ctx, samples, calRot, calTransM);
 
 	if (!hadValidProfileAtCalStart)
-	{
-		ctx.predictionAuto = false;
-		ctx.predictionTime = 2.0f;
 		ctx.enableAngularVelocity = true;
-		ctx.headFilterEnabled = false;
-		ctx.headFilterParams = filter_defaults::Head;
-		ctx.driftFilterParams = filter_defaults::Off;
-		CalCtx.Log("First calibration — smoothing off, manual 2-frame prediction, angular velocity on.\n");
-	}
 
 	ctx.validProfile = true;
 	ctx.lastCalibrationTime = (double)std::time(nullptr);

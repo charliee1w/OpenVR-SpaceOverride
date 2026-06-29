@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 #include "Configuration.h"
+#include "Calibration.h"
 #include "FilterDefaults.h"
 
 #include <Windows.h>
@@ -144,7 +145,12 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["autoPartialRecalOnMountDrift"].is<bool>())
 		ctx.autoPartialRecalOnMountDrift = obj["autoPartialRecalOnMountDrift"].get<bool>();
 	else
-		ctx.autoPartialRecalOnMountDrift = true;
+		ctx.autoPartialRecalOnMountDrift = false;
+
+	if (obj["tundraMode"].is<bool>())
+		ctx.tundraMode = obj["tundraMode"].get<bool>();
+	else
+		ctx.tundraMode = false;
 
 	auto loadOneEuro = [&](const char *key, protocol::OneEuroParams &out, protocol::OneEuroParams def) {
 		out = def;
@@ -157,8 +163,13 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	};
 
 	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : false;
-	loadOneEuro("headFilter", ctx.headFilterParams, filter_defaults::Head);
-	loadOneEuro("driftFilter", ctx.driftFilterParams, filter_defaults::Drift);
+	if (obj["headFilter"].is<picojson::object>() || obj["driftFilter"].is<picojson::object>())
+	{
+		loadOneEuro("headFilter", ctx.headFilterParams, filter_defaults::Head);
+		loadOneEuro("driftFilter", ctx.driftFilterParams, filter_defaults::Drift);
+	}
+	else
+		ApplyFilterPresetsFromModes(ctx);
 
 	if (obj["rel_qw"].is<double>())
 	{
@@ -266,6 +277,7 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["predictionTime"].set<double>(time);
 	profile["predictionAuto"].set<bool>(ctx.predictionAuto);
 	profile["autoPartialRecalOnMountDrift"].set<bool>(ctx.autoPartialRecalOnMountDrift);
+	profile["tundraMode"].set<bool>(ctx.tundraMode);
 
 	profile["headFilterEnabled"].set<bool>(ctx.headFilterEnabled);
 

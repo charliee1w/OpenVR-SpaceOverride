@@ -12,11 +12,13 @@ if ([string]::IsNullOrWhiteSpace($json)) {
 }
 $obj = $json | ConvertFrom-Json
 if ($obj -is [array]) { $p = $obj[0] } else { $p = $obj }
-$p.predictionAuto = $false
-$p.predictionTime = 2.0
-$p.eAngVel = $true
-$p.headFilterEnabled = $false
+$p | Add-Member -NotePropertyName predictionAuto -NotePropertyValue $false -Force
+$p | Add-Member -NotePropertyName predictionTime -NotePropertyValue 2.0 -Force
+$p | Add-Member -NotePropertyName eAngVel -NotePropertyValue $true -Force
+$p | Add-Member -NotePropertyName headFilterEnabled -NotePropertyValue $false -Force
+$p | Add-Member -NotePropertyName tundraMode -NotePropertyValue $false -Force
+$p | Add-Member -NotePropertyName autoPartialRecalOnMountDrift -NotePropertyValue $false -Force
 $out = if ($obj -is [array]) { @($p) | ConvertTo-Json -Depth 8 -Compress } else { $p | ConvertTo-Json -Depth 8 -Compress }
 Set-ItemProperty -Path $regPath -Name Config -Value $out
-Write-Host 'Applied safe profile: predictionAuto=false, predictionTime=2, eAngVel=true, headFilterEnabled=false'
+Write-Host 'Applied safe profile: prediction manual 2f, smoothing off, tundra/auto-recal modes off'
 Write-Host 'Restart SteamVR, then open Space Override once to re-apply driver state.'

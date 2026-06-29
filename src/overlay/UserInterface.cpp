@@ -497,6 +497,15 @@ void UserInterface::Render(bool runningInOverlay)
 
 			bool changed = false;
 
+			if (ImGui::Checkbox("Tundra mode", &CalCtx.tundraMode))
+			{
+				ApplyFilterPresetsFromModes(CalCtx);
+				changed = true;
+			}
+			ImGui::SetItemTooltip(
+				"Stronger smoothing presets for Tundra / jitter-prone mounts.\n"
+				"Requires Smooth headset tracker below.");
+
 			changed |= ImGui::Checkbox("Smooth headset tracker", &CalCtx.headFilterEnabled);
 			ImGui::SetItemTooltip("Steadies what you see through the headset to reduce shaking. This can add a tiny bit of delay, so if your view feels laggy when you move quickly, adjust the sliders below.");
 
@@ -516,7 +525,11 @@ void UserInterface::Render(bool runningInOverlay)
 			changed |= paramSliders("drift", CalCtx.driftFilterParams);
 
 			if (changed)
+			{
 				SendOneEuroParams();
+				if (CalCtx.validProfile)
+					SaveProfile(CalCtx);
+			}
 
 			ImGui::EndTabItem();
 		}
@@ -533,6 +546,26 @@ void UserInterface::Render(bool runningInOverlay)
 			const double settingsApplyTime = CalCtx.timeLastTick;
 
 			ImGui::BeginChild("##left_panel", ImVec2(halfWidth, 0), true);
+
+			ImGui::SeparatorText("Tracker modes");
+			if (ImGui::Checkbox("Tundra mode", &CalCtx.tundraMode))
+			{
+				ApplyFilterPresetsFromModes(CalCtx);
+				if (CalCtx.headFilterEnabled)
+					SendOneEuroParams();
+				runtimeSettingsChanged = true;
+			}
+			ImGui::SetItemTooltip(
+				"Uses stronger smoothing presets for Tundra / jitter-prone head mounts.\n"
+				"Enable Smooth headset tracker on the Smoothing tab to apply. Off by default.");
+
+			if (CalCtx.trackerTundraDetected)
+				ImGui::TextDisabled("Tundra-class tracker detected on this device");
+			else if (!CalCtx.trackerSerial.empty())
+				ImGui::TextDisabled("Head tracker: %s", CalCtx.trackerSerial.c_str());
+
+			ImGui::Spacing();
+			ImGui::SeparatorText("Tracking behavior");
 
 			runtimeSettingsChanged |= ImGui::Checkbox("Fallback to SLAM", &CalCtx.fallbackToSlam);
 			ImGui::SetItemTooltip(
@@ -639,7 +672,10 @@ void UserInterface::Render(bool runningInOverlay)
 			ImGui::EndChild();
 
 			if (runtimeSettingsChanged && CalCtx.validProfile)
+			{
 				ApplyRuntimeDriverSettings(settingsApplyTime);
+				SaveProfile(CalCtx);
+			}
 
 			ImGui::Spacing();
 			if (ImGui::CollapsingHeader("Diagnostics", ImGuiTreeNodeFlags_DefaultOpen))
@@ -750,6 +786,10 @@ void UserInterface::Render(bool runningInOverlay)
 						ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.3f, 1.0f),
 							"Mount rigidity warning: partial RMS %.1f mm vs baseline %.1f mm",
 							CalCtx.lastPartialMountRmsMm, CalCtx.baselineMountRmsMm);
+
+					ImGui::Text("Tundra mode: %s%s",
+						CalCtx.tundraMode ? "on" : "off",
+						CalCtx.trackerTundraDetected ? " (Tundra tracker detected)" : "");
 
 					if (CalCtx.lastCalibrationTime > 0.0)
 					{
