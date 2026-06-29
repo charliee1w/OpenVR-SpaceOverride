@@ -1272,9 +1272,10 @@ static void FinishFullCalibration(CalibrationContext& ctx, std::vector<calibrati
 
 	if (!hadValidProfileAtCalStart)
 	{
-		ctx.predictionAuto = true;
+		ctx.predictionAuto = false;
+		ctx.predictionTime = 2.0f;
 		ctx.enableAngularVelocity = true;
-		CalCtx.Log("First calibration — enabled prediction auto-tune and angular velocity.\n");
+		CalCtx.Log("First calibration — set manual 2-frame prediction and angular velocity for VD/SLAM.\n");
 	}
 
 	ctx.validProfile = true;

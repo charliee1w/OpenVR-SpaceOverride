@@ -16,9 +16,9 @@ namespace
 	constexpr double BlendToSlamSec = 0.225;
 	constexpr double MinScale = 0.01;
 	constexpr double MaxScale = 100.0;
-	constexpr float MaxPredictionFrames = 4.0f;
-	constexpr float WirelessStreamBiasFrames = 0.75f;
-	constexpr float WirelessPredictionFallbackFrames = 2.0f;
+	constexpr float MaxPredictionFrames = 3.0f;
+	constexpr float WirelessStreamBiasFrames = 0.5f;
+	constexpr float WirelessPredictionFallbackFrames = 1.5f;
 
 	bool IsValidDeviceIndex(uint32_t id)
 	{
@@ -848,10 +848,11 @@ void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 		}
 		else
 		{
+			const bool useAngVel = hmdTracker.enableAngularVelocity || !hmdTracker.native;
 			for (int i = 0; i < 3; i++)
 			{
 				pose.vecVelocity[i] = vel.v[i];
-				pose.vecAngularVelocity[i] = hmdTracker.enableAngularVelocity ? angVel.v[i] : 0.0;
+				pose.vecAngularVelocity[i] = useAngVel ? angVel.v[i] : 0.0;
 			}
 		}
 	}
@@ -954,8 +955,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	{
 		const uint32_t poseCount = (std::min)(trackerID + 1, vr::k_unMaxTrackedDeviceCount);
 		vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+		// Fetch tracker at t=0; compositor reprojection uses pose velocities, not predicted poses.
 		vr::VRServerDriverHost()->GetRawTrackedDevicePoses(
-			predictionSeconds,
+			0.0f,
 			poses,
 			poseCount);
 

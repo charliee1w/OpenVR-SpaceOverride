@@ -115,6 +115,9 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
 	else
 		ctx.enableAngularVelocity = true;
+	// SLAM HMD override needs angular velocity for compositor reprojection.
+	if (!ctx.enableNative && !ctx.enableAngularVelocity)
+		ctx.enableAngularVelocity = true;
 
 	if (obj["continuousSync"].is<bool>())
 		ctx.continuousSync = obj["continuousSync"].get<bool>();
@@ -136,7 +139,7 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["predictionAuto"].is<bool>())
 		ctx.predictionAuto = obj["predictionAuto"].get<bool>();
 	else
-		ctx.predictionAuto = true;
+		ctx.predictionAuto = false;
 
 	if (obj["autoPartialRecalOnMountDrift"].is<bool>())
 		ctx.autoPartialRecalOnMountDrift = obj["autoPartialRecalOnMountDrift"].get<bool>();
