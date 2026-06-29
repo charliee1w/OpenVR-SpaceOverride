@@ -3,13 +3,16 @@
 #define _CRT_SECURE_NO_DEPRECATE
 #include "Logging.h"
 #include <chrono>
+#include <cstdarg>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <windows.h>
 
 FILE *LogFile;
+static std::mutex g_logMutex;
 static bool logFileOwned = false;
 static std::filesystem::path g_logPath;
 static std::uintmax_t g_bytesSinceRotateCheck = 0;
@@ -48,6 +51,8 @@ static void RotateLogFileIfNeeded(const std::filesystem::path& logPath)
 
 static bool ReopenLogFile()
 {
+	std::lock_guard<std::mutex> lock(g_logMutex);
+
 	if (logFileOwned && LogFile != nullptr && LogFile != stderr)
 		fclose(LogFile);
 
@@ -85,6 +90,8 @@ void OpenLogFile()
 
 void CloseLogFile()
 {
+	std::lock_guard<std::mutex> lock(g_logMutex);
+
 	if (logFileOwned && LogFile != nullptr && LogFile != stderr)
 		fclose(LogFile);
 	LogFile = nullptr;
@@ -105,7 +112,7 @@ tm TimeForLog()
 	return value;
 }
 
-void LogFlush()
+static void LogFlushUnlocked()
 {
 	if (!LogFile)
 		return;
@@ -134,7 +141,47 @@ void LogFlush()
 		return;
 	}
 
-	ReopenLogFile();
+	if (logFileOwned && LogFile != nullptr && LogFile != stderr)
+		fclose(LogFile);
+
+	try
+	{
+		std::filesystem::create_directories(g_logPath.parent_path());
+		RotateLogFileIfNeeded(g_logPath);
+	}
+	catch (...) {}
+
+	LogFile = fopen(g_logPath.string().c_str(), "a");
+	logFileOwned = (LogFile != nullptr);
+	if (!logFileOwned)
+	{
+		fprintf(stderr, "[OpenVR-SpaceOverride] Failed to open %s — logging to stderr\n", g_logPath.string().c_str());
+		LogFile = stderr;
+	}
+
+	g_bytesSinceRotateCheck = 0;
+}
+
+void LogFlush()
+{
+	std::lock_guard<std::mutex> lock(g_logMutex);
+	LogFlushUnlocked();
+}
+
+void LogMessage(const char* fmt, ...)
+{
+	std::lock_guard<std::mutex> lock(g_logMutex);
+
+	tm logNow = TimeForLog();
+	fprintf(LogOutput(), "[%02d:%02d:%02d] ", logNow.tm_hour, logNow.tm_min, logNow.tm_sec);
+
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(LogOutput(), fmt, args);
+	va_end(args);
+
+	fprintf(LogOutput(), "\n");
+	LogFlushUnlocked();
 }
 
 bool LogRateLimited(const char* key, unsigned intervalMs)

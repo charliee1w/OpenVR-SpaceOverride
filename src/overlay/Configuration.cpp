@@ -131,7 +131,7 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	else
 		ctx.predictionTime = 1.0;
 	RequireFinite(ctx.predictionTime, "predictionTime");
-	ctx.predictionTime = std::clamp(ctx.predictionTime, 0.0f, 3.0f);
+	ctx.predictionTime = std::clamp(ctx.predictionTime, 0.0f, 4.0f);
 
 	if (obj["predictionAuto"].is<bool>())
 		ctx.predictionAuto = obj["predictionAuto"].get<bool>();

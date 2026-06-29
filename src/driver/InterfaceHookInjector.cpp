@@ -59,7 +59,7 @@ namespace
 		if (now - lastLogMs < 5000)
 			return false;
 		lastLogMs = now;
-		LOG("DriverPose_t size mismatch: expected %zu got %u (device %u) — pose dropped",
+		LOG("DriverPose_t size mismatch: expected %zu got %u (device %u) — passing through unmodified",
 			sizeof(vr::DriverPose_t), structSize, device);
 		return true;
 	}
@@ -96,6 +96,7 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 	{
 		LogPoseSizeMismatch(unWhichDevice, unPoseStructSize);
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
 	}
 	auto pose = newPose;
@@ -116,6 +117,7 @@ static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevic
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 	{
 		LogPoseSizeMismatch(unWhichDevice, unPoseStructSize);
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
 	}
 	auto pose = newPose;

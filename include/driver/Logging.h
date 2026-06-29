@@ -12,6 +12,7 @@ void CloseLogFile();
 
 tm TimeForLog();
 void LogFlush();
+void LogMessage(const char* fmt, ...);
 
 // Returns true when enough time elapsed since the last log with this key.
 bool LogRateLimited(const char* key, unsigned intervalMs = 5000);
@@ -22,11 +23,7 @@ inline FILE* LogOutput()
 }
 
 #ifndef LOG
-#define LOG(fmt, ...) do { \
-	tm logNow = TimeForLog(); \
-	fprintf(LogOutput(), "[%02d:%02d:%02d] " fmt "\n", logNow.tm_hour, logNow.tm_min, logNow.tm_sec, ##__VA_ARGS__); \
-	LogFlush(); \
-} while (0)
+#define LOG(fmt, ...) LogMessage(fmt, ##__VA_ARGS__)
 #endif
 
 #ifndef TRACE

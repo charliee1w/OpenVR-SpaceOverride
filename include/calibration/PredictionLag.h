@@ -27,7 +27,7 @@ namespace calibration
 	LagEstimate estimatePredictionLagFrames(
 		const AngVelSeries& series,
 		std::size_t minSamples = 45,
-		int maxLagFrames = 3);
+		int maxLagFrames = 4);
 
 	double correlationAtLag(const AngVelSeries& series, int lagFrames);
 }

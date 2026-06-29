@@ -69,7 +69,7 @@ namespace calibration
 		if (series.tracker.size() != series.slam.size() || series.tracker.size() < minSamples)
 			return result;
 
-		maxLagFrames = std::clamp(maxLagFrames, 0, 3);
+		maxLagFrames = std::clamp(maxLagFrames, 0, 4);
 
 		double bestCorr = -2.0;
 		int bestLag = 0;

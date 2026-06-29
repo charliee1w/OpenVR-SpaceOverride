@@ -159,6 +159,15 @@ void IPCServer::Stop()
 		return;
 
 	stop = true;
+
+	std::vector<PipeInstance *> pipeList;
+	{
+		std::lock_guard<std::mutex> lock(pipesMutex);
+		pipeList.assign(pipes.begin(), pipes.end());
+	}
+	for (auto *pipeInst : pipeList)
+		CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
+
 	SetEvent(connectEvent);
 	mainThread.join();
 	running = false;
@@ -167,7 +176,7 @@ void IPCServer::Stop()
 
 IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 {
-	auto pipeInst = new PipeInstance;
+	auto pipeInst = new PipeInstance{};
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
 	{
@@ -179,6 +188,10 @@ IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 
 void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 {
+	if (!pipeInst)
+		return;
+
+	CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
 	DisconnectNamedPipe(pipeInst->pipe);
 	CloseHandle(pipeInst->pipe);
 	{
@@ -225,9 +238,23 @@ void IPCServer::RunThread(IPCServer *_this)
 					LOG("GetOverlappedResult failed in RunThread. Error: %d — retrying", GetLastError());
 					if (nextPipe != INVALID_HANDLE_VALUE)
 						CloseHandle(nextPipe);
+					nextPipe = INVALID_HANDLE_VALUE;
+					ResetEvent(connectEvent);
 					connectPending = CreateAndConnectInstance(&connectOverlap, nextPipe);
+					if (!connectPending && nextPipe != INVALID_HANDLE_VALUE)
+						SetEvent(connectEvent);
 					continue;
 				}
+			}
+
+			if (nextPipe == INVALID_HANDLE_VALUE)
+			{
+				ResetEvent(connectEvent);
+				Sleep(25);
+				connectPending = CreateAndConnectInstance(&connectOverlap, nextPipe);
+				if (!connectPending && nextPipe != INVALID_HANDLE_VALUE)
+					SetEvent(connectEvent);
+				continue;
 			}
 
 			if (LogRateLimited("IPC client connected", 5000))
@@ -237,12 +264,24 @@ void IPCServer::RunThread(IPCServer *_this)
 			CompletedWriteCallback(0, protocol::IpcResponseSize, (LPOVERLAPPED) pipeInst);
 
 			connectPending = CreateAndConnectInstance(&connectOverlap, nextPipe);
+			if (!connectPending && nextPipe != INVALID_HANDLE_VALUE)
+				SetEvent(connectEvent);
 		}
 		else if (wait != WAIT_IO_COMPLETION)
 		{
 			LOG("WaitForSingleObjectEx failed in RunThread. Error: %d — continuing", GetLastError());
 		}
 	}
+
+	if (nextPipe != INVALID_HANDLE_VALUE)
+	{
+		CancelIoEx(nextPipe, &connectOverlap);
+		CloseHandle(nextPipe);
+		nextPipe = INVALID_HANDLE_VALUE;
+	}
+
+	for (int drain = 0; drain < 10; ++drain)
+		SleepEx(50, TRUE);
 
 	std::vector<PipeInstance *> pipeList;
 	{
@@ -307,6 +346,9 @@ BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
 void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED overlap)
 {
 	PipeInstance *pipeInst = (PipeInstance *) overlap;
+	if (!pipeInst || !pipeInst->server || pipeInst->server->stop)
+		return;
+
 	BOOL success = FALSE;
 
 	if (err == 0 && bytesRead == protocol::IpcRequestSize)
@@ -339,6 +381,9 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 void IPCServer::CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPPED overlap)
 {
 	PipeInstance *pipeInst = (PipeInstance *) overlap;
+	if (!pipeInst || !pipeInst->server || pipeInst->server->stop)
+		return;
+
 	BOOL success = FALSE;
 
 	if (err == 0 && bytesWritten == protocol::IpcResponseSize)
