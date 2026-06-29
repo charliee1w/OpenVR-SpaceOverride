@@ -127,10 +127,22 @@ auto ShowCalibrationNotification(const char* text) -> vr::VRNotificationId
     return id;
 }
 
+#ifdef _WIN32
+static HANDLE g_singleInstanceMutex = nullptr;
+
+static bool AcquireSingleInstance()
+{
+    g_singleInstanceMutex = CreateMutexA(nullptr, TRUE, "Local\\Nyabsi.SpaceOverride.SingleInstance");
+    return g_singleInstanceMutex != nullptr && GetLastError() != ERROR_ALREADY_EXISTS;
+}
+#endif
+
 int main(int argc, char** argv)
 {
 #ifdef _WIN32
     ShowWindow(GetConsoleWindow(), SW_HIDE);
+    if (argc < 2 && !AcquireSingleInstance())
+        return 0;
 #endif
     HandleCommandLine(argc, argv);
 

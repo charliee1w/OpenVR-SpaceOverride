@@ -13,8 +13,11 @@
 
 static auto OpenVRInit(vr::EVRApplicationType type) -> void
 {
-    vr::EVRInitError result = {};
+    vr::EVRInitError result = vr::VRInitError_None;
     VR_Init(&result, type);
+
+    if (result == vr::VRInitError_None)
+        return;
 
     // if VRApplication_Background is specified when trying to launch
     // and SteamVR is not running, it will throw VRInitError_Init_NoServerForBackgroundApp (121)
@@ -23,6 +26,14 @@ static auto OpenVRInit(vr::EVRApplicationType type) -> void
 
     if (result == vr::VRInitError_Init_HmdNotFound)
         throw std::runtime_error(std::format("SteamVR was running but headset was not found."));
+
+    if (result == vr::VRInitError_Init_AnotherAppLaunching)
+        throw std::runtime_error(std::format("Space Override is already starting — wait a moment and use the dashboard icon."));
+
+    throw std::runtime_error(std::format(
+        "OpenVR init failed: {} ({})",
+        vr::VR_GetVRInitErrorAsEnglishDescription(result),
+        static_cast<int>(result)));
 }
 
 static auto OpenVRManifestInstalled(const char* appKey) -> bool
