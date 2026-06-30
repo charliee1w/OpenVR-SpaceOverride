@@ -99,4 +99,14 @@ private:
 
 		void reset() { valid = false; rotationFilter.reset(); translationFilter.reset(); }
 	} headFilter;
+
+	struct HeadVelocity
+	{
+		bool valid = false;
+		LARGE_INTEGER lastUpdate = {};
+		vr::HmdQuaternion_t prevRotation = { 1, 0, 0, 0 };
+		oneeuro::Vec3 filter;
+
+		void reset() { valid = false; filter.reset(); }
+	} headVel;
 };

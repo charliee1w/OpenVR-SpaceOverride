@@ -71,15 +71,15 @@ bool EndsWith(const std::string &str, const std::string &suffix)
 	return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
 }
 
-Eigen::Vector3d RotationVector(const Eigen::Matrix3d &rot)
+Eigen::Vector3d RotationVector(const Eigen::Matrix3d& rot)
 {
 	Eigen::AngleAxisd aa(rot);
 	return aa.angle() * aa.axis();
 }
 
-double AngleFromRotationMatrix3(const Eigen::Matrix3d &rot)
+double AngleFromRotationMatrix3(const Eigen::Matrix3d& rot)
 {
-	double c = (rot(0,0) + rot(1,1) + rot(2,2) - 1.0) / 2.0;
+	double c = (rot(0, 0) + rot(1, 1) + rot(2, 2) - 1.0) / 2.0;
 	return acos(max(-1.0, min(1.0, c)));
 }
 
@@ -173,7 +173,7 @@ DSample DeltaRotationSamples(Sample s1, Sample s2)
 	return ds;
 }
 
-Eigen::Vector3d CalibrateRotation(const std::vector<Sample> &samples)
+Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 {
 	std::vector<DSample> deltas;
 
@@ -205,7 +205,7 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample> &samples)
 	Eigen::Matrix3d i = Eigen::Matrix3d::Identity();
 	if ((svd.matrixU() * svd.matrixV().transpose()).determinant() < 0)
 	{
-		i(2,2) = -1;
+		i(2, 2) = -1;
 	}
 
 	Eigen::Matrix3d rot = svd.matrixV() * i * svd.matrixU().transpose();
@@ -218,7 +218,7 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample> &samples)
 	return euler;
 }
 
-Eigen::Vector3d CalibrateTranslation(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation)
+Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation)
 {
 	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
 
@@ -549,8 +549,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			continue;
 
 		bool sync = ctx.continuousSync
-			// NOTE: this allows HMD itself to be synced, this might work, but if people start reporting issues, remove this, myself to myself
-			//&& id != vr::k_unTrackedDeviceIndex_Hmd
+			&& id != vr::k_unTrackedDeviceIndex_Hmd
 			&& deviceClass != vr::TrackedDeviceClass_TrackingReference;
 
 		if (sync)
