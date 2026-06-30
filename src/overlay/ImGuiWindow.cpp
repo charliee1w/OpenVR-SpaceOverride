@@ -18,7 +18,6 @@
 #include <math.h>
 
 #include "EmbeddedFiles.h"
-#include "UserInterface.h"
 
 #define IMGUI_NORMALIZED_RGBA(r, g, b, a) ImVec4(((r) / 255.0f), ((g) / 255.0f), ((b) / 255.0f), ((a) / 255.0f))
 
@@ -221,7 +220,7 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
 
     renderer->SetupRenderTarget(width, height, render_format);
 
-    m_userInterface_ = UserInterface();
+    m_userInterface_ = {};
 }
 
 auto ImGuiWindow::Show() -> void

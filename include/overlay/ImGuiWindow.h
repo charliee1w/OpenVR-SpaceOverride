@@ -9,8 +9,7 @@
 
 #include "VulkanRenderer.h"
 #include "VrOverlay.h"
-
-class UserInterface;
+#include "UserInterface.h"
 
 class ImGuiWindow
 {
