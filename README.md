@@ -79,6 +79,16 @@ Expected behavior, not a bug.
 
 Your controllers use the headset's inside-out tracking, which drifts relative to your lighthouse space, the driver corrects that drift and shifts back into place.
 
+### My full body tracking seems weird in VRChat!
+
+This is expected, there is issues with the VRChat IK system that is not obvious from first glance.
+
+Usually Space Calibrator is not precise enough for these issues to show up, but with SpaceOverride you will see these issues.
+
+Each Lighthouse HMD suffers from the same issues and this is unfortunately the reality we live in.
+
+I am unable to solve these issues as they are not caused by SpaceOverride but I am working on potential workarounds.
+
 ## FAQ
 
 ### How is this different from TrackingOverride?
