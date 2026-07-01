@@ -1,6 +1,6 @@
 # OpenVR-SpaceOverride (community fork)
 
-> **Fork notice:** Community-maintained fork of [Nyabsi's OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride), with stability fixes, weighted calibration, ecosystem coexistence tooling, and improved deploy/diagnostics. **Windows only.** Report issues on [GitHub Issues](https://github.com/charliee1w/OpenVR-SpaceOverride/issues).
+> **Fork notice:** Community fork of [Nyabsi's OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride), maintained by **[charliee1w](https://github.com/charliee1w)** — stability fixes, weighted calibration, ecosystem coexistence tooling, and improved deploy/diagnostics. **Windows only.** Report issues on [GitHub Issues](https://github.com/charliee1w/OpenVR-SpaceOverride/issues).
 
 OpenVR-SpaceOverride aligns SLAM-tracked headsets (Quest via Virtual Desktop, Pico, ALVR, etc.) with lighthouse-tracked devices. After calibration, a **rigid-mounted Vive tracker** drives the HMD pose instead of SLAM — eliminating drift between tracking systems.
 
@@ -178,9 +178,10 @@ Works alongside **OpenVR Space Calibrator** — different approach, no conflict.
 | **SmoothTracking** | Independent pose pipeline; no known conflict. |
 | **SteamVR updates** | Can break vtable hooks — check driver log for `Enabled hook for IVRServerDriverHost` after updates; re-run `harden-steamvr-stack.ps1`. |
 
-## Acknowledgements
+## Credits
 
-- [Nyabsi](https://github.com/Nyabsi) — original OpenVR-SpaceOverride
+- **[charliee1w](https://github.com/charliee1w)** — fork maintainer (v8.x community release)
+- [Nyabsi](https://github.com/Nyabsi) — original [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride)
 - [pushrax](https://github.com/pushrax) — [OpenVR-SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) (calibration math heritage)
 
 ## License

@@ -610,10 +610,11 @@ void UserInterface::Render(bool runningInOverlay)
 				}
 			}
 
-			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
+			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 4.0f : 3.0f);
 			ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
 			ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			ImGui::Text("OpenVR-SpaceOverride v%s (community fork)", SPACECAL_VERSION_STRING);
+			ImGui::TextDisabled("Maintained by charliee1w");
 			ImGui::TextDisabled("Based on Nyabsi/SpaceOverride; calibration math from OpenVR-SpaceCalibrator");
 			if (runningInOverlay)
 			{
@@ -1119,6 +1120,15 @@ void UserInterface::Render(bool runningInOverlay)
 				{
 					ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.3f, 1.0f), "Import failed — check path and JSON.");
 					ImGui::EndPopup();
+				}
+
+				ImGui::Separator();
+				if (ImGui::CollapsingHeader("Credits", ImGuiTreeNodeFlags_DefaultOpen))
+				{
+					ImGui::Text("Fork maintained by charliee1w");
+					ImGui::TextDisabled("github.com/charliee1w/OpenVR-SpaceOverride");
+					ImGui::TextDisabled("Based on Nyabsi/OpenVR-SpaceOverride");
+					ImGui::TextDisabled("Calibration math heritage: pushrax/OpenVR-SpaceCalibrator");
 				}
 			}
 

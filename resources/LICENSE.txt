@@ -1,6 +1,9 @@
 OpenVR-SpaceOverride
 Copyright (C) 2026 Nyabsi
 
+Community fork (v8.x) maintained by charliee1w
+https://github.com/charliee1w/OpenVR-SpaceOverride
+
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published
 by the Free Software Foundation, either version 3 of the License, or
