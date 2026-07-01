@@ -37,8 +37,8 @@ void IPCClient::Disconnect()
 
 void IPCClient::Connect()
 {
-	const int maxAttempts = 3;
-	DWORD delayMs = 2000;
+	const int maxAttempts = 5;
+	DWORD delayMs = 1000;
 
 	for (int attempt = 1; attempt <= maxAttempts; ++attempt)
 	{
@@ -51,10 +51,10 @@ void IPCClient::Connect()
 		{
 			Disconnect();
 
-			if (attempt >= 3)
+			if (attempt >= maxAttempts)
 				throw;
 
-			fprintf(stderr, "IPC connect failed (attempt %d/3), retrying in %lums: %s\n", attempt, delayMs, e.what());
+			fprintf(stderr, "IPC connect failed (attempt %d/%d), retrying in %lums: %s\n", attempt, maxAttempts, delayMs, e.what());
 			Sleep(delayMs);
 			delayMs *= 2;
 		}
@@ -125,7 +125,7 @@ protocol::Response IPCClient::Receive()
 void IPCClient::ConnectInternal()
 {
 	LPCTSTR pipeName = TEXT(OPENVR_SPACEOVERRIDE_PIPE_NAME);
-	WaitNamedPipe(pipeName, 1000);
+	WaitNamedPipe(pipeName, 3000);
 	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
 	if (pipe == INVALID_HANDLE_VALUE)
 	{

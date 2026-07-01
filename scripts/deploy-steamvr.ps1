@@ -128,6 +128,22 @@ if ($steamRunning -and (Test-Path $InstallOverlayExe)) {
         Pop-Location
     }
 }
+elseif ($pfOverlayCopied -and (Test-Path $InstallOverlayExe)) {
+    Write-Host "SteamVR is not running — registering overlay manifest from Program Files:"
+    Push-Location $InstallRoot
+    try {
+        & $InstallOverlayExe -installmanifest
+        if ($LASTEXITCODE -ne 0) { throw "-installmanifest failed" }
+        Write-Host "  OK overlay manifest + autolaunch"
+
+        & $InstallOverlayExe -activatemultipledrivers
+        if ($LASTEXITCODE -ne 0) { throw "-activatemultipledrivers failed" }
+        Write-Host "  OK activateMultipleDrivers"
+    }
+    finally {
+        Pop-Location
+    }
+}
 else {
     Write-Host "SteamVR is not running."
     Write-Host "  Skipped -installmanifest and -activatemultipledrivers."
@@ -180,15 +196,17 @@ Write-Host "Updating portable dist/ package:"
 
 $PortableOverlay = Join-Path $RepoRoot "dist\OpenVR-SpaceOverride\OpenVR-SpaceOverride.exe"
 $PortableDir = Join-Path $RepoRoot "dist\OpenVR-SpaceOverride"
-if ((Test-Path $PortableOverlay) -and $steamRunning) {
-    Write-Host ""
-    Write-Host "Registering overlay autolaunch from portable dist (no admin required):"
-    Push-Location $PortableDir
+if ((Test-Path $InstallOverlayExe) -and (Test-Path $InstallOverlayManifest)) {
+    Write-Host "  Registering overlay autolaunch from Program Files install:"
+    Push-Location $InstallRoot
     try {
-        & $PortableOverlay -installmanifest
+        & $InstallOverlayExe -installmanifest
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  OK portable overlay manifest registered"
-            & $PortableOverlay -activatemultipledrivers
+            Write-Host "  OK Program Files overlay manifest registered"
+            & $InstallOverlayExe -activatemultipledrivers
+        }
+        else {
+            Write-Host "  WARN -installmanifest returned $LASTEXITCODE"
         }
     }
     finally {
@@ -196,8 +214,8 @@ if ((Test-Path $PortableOverlay) -and $steamRunning) {
     }
 }
 elseif (Test-Path $PortableOverlay) {
-    Write-Host "  Portable overlay ready at: $PortableDir"
-    Write-Host "  Registering autolaunch from portable dist (no admin):"
+    Write-Host ""
+    Write-Host "Program Files overlay unavailable — registering autolaunch from portable dist:"
     Push-Location $PortableDir
     try {
         & $PortableOverlay -installmanifest

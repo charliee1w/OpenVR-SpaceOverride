@@ -135,6 +135,16 @@ foreach ($log in $Logs) {
 }
 
 Write-Host ""
+Write-Host "--- Session log analysis ---"
+$analyzeScript = Join-Path $PSScriptRoot "analyze-vr-logs.ps1"
+if (Test-Path $analyzeScript) {
+    & $analyzeScript
+}
+else {
+    Write-Host "WARN analyze-vr-logs.ps1 not found"
+}
+
+Write-Host ""
 Write-Host "--- Expected Diagnostics when working ---"
 Write-Host "  Pose hooks: installed"
 Write-Host "  Driver override: active"

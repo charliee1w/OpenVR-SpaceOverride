@@ -90,6 +90,8 @@ struct CalibrationContext
 	bool enableAngularVelocity = true;
 	bool continuousSync = false;
 	bool syncHmdDrift = false;
+	bool applyCalToStandable = false;
+	bool quitStandableOnExit = true;
 	float predictionTime = 1.0f;
 	bool predictionAuto = false;
 	float predictionLagMs = 0.0f;
@@ -168,6 +170,8 @@ struct CalibrationContext
 		fallbackToSlam = false;
 		continuousSync = false;
 		syncHmdDrift = false;
+		applyCalToStandable = false;
+		quitStandableOnExit = true;
 		overrideStatus = {};
 		calibrationFailureOffer = false;
 		lastCalibrationRmsMm = 0.0;
@@ -264,6 +268,7 @@ void SendOneEuroParams();
 void FetchPredictionTelemetry();
 void FetchDriverTelemetry();
 void InvalidateAppliedDriverState();
+void ApplyProfileAfterLoad();
 void ApplyRuntimeDriverSettings(double timeSec);
 void UpdateRuntimeTrackingQuality(CalibrationContext& ctx);
 void UpdateGuardianBoundaryStatus(CalibrationContext& ctx);

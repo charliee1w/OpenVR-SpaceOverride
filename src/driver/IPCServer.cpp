@@ -191,6 +191,13 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 	if (!pipeInst)
 		return;
 
+	if (pipeInst->connectedAtMs != 0)
+	{
+		const ULONGLONG durationMs = GetTickCount64() - pipeInst->connectedAtMs;
+		if (LogRateLimited("IPC session duration", 5000))
+			LOG("IPC client session ended after %llu ms", durationMs);
+	}
+
 	CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
 	DisconnectNamedPipe(pipeInst->pipe);
 	CloseHandle(pipeInst->pipe);
@@ -261,6 +268,7 @@ void IPCServer::RunThread(IPCServer *_this)
 				LOG("IPC client connected");
 
 			auto pipeInst = _this->CreatePipeInstance(nextPipe);
+			pipeInst->connectedAtMs = GetTickCount64();
 			CompletedWriteCallback(0, protocol::IpcResponseSize, (LPOVERLAPPED) pipeInst);
 
 			connectPending = CreateAndConnectInstance(&connectOverlap, nextPipe);

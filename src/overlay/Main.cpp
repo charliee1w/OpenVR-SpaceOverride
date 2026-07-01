@@ -35,6 +35,7 @@
 
 #include "Calibration.h"
 #include "Configuration.h"
+#include "StandableQuit.h"
 #include "UserInterface.h"
 
 #ifdef _WIN32
@@ -226,6 +227,7 @@ int main(int argc, char** argv)
     try {
         InitCalibrator();
         LoadProfile(CalCtx);
+        ApplyProfileAfterLoad();
     }
     catch (std::exception& ex) {
 #ifdef _WIN32
@@ -321,6 +323,8 @@ int main(int argc, char** argv)
                     [[fallthrough]];
                 case vr::VREvent_RestartRequested:
                 {
+                    if (CalCtx.quitStandableOnExit)
+                        QuitStandableOnSteamVRExit();
                     vr::VRSystem()->AcknowledgeQuit_Exiting();
                     g_ticking = false;
                     break;

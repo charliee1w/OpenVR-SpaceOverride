@@ -20,5 +20,26 @@ $p | Add-Member -NotePropertyName tundraMode -NotePropertyValue $false -Force
 $p | Add-Member -NotePropertyName autoPartialRecalOnMountDrift -NotePropertyValue $false -Force
 $out = if ($obj -is [array]) { @($p) | ConvertTo-Json -Depth 8 -Compress } else { $p | ConvertTo-Json -Depth 8 -Compress }
 Set-ItemProperty -Path $regPath -Name Config -Value $out
+$prefs = [ordered]@{
+    preferred_tracker_serial = $p.preferred_tracker_serial
+    native = $p.native
+    fallbackSlam = $p.fallbackSlam
+    eAngVel = $p.eAngVel
+    continuousSync = $p.continuousSync
+    syncHmdDrift = $p.syncHmdDrift
+    applyCalToStandable = $false
+    quitStandableOnExit = $true
+    predictionTime = $p.predictionTime
+    predictionAuto = $p.predictionAuto
+    autoPartialRecalOnMountDrift = $p.autoPartialRecalOnMountDrift
+    tundraMode = $p.tundraMode
+    headFilterEnabled = $p.headFilterEnabled
+    headFilter = $p.headFilter
+    driftFilter = $p.driftFilter
+    calibration_speed = $p.calibration_speed
+    chaperone = @{ auto_apply = $p.chaperone.auto_apply }
+}
+$prefsJson = $prefs | ConvertTo-Json -Depth 8 -Compress
+Set-ItemProperty -Path $regPath -Name ConfigPrefs -Value $prefsJson
 Write-Host 'Applied safe profile: prediction manual 2f, smoothing off, tundra/auto-recal modes off'
-Write-Host 'Restart SteamVR, then open Space Override once to re-apply driver state.'
+Write-Host 'Restart SteamVR — Space Override will auto-apply saved settings on launch.'

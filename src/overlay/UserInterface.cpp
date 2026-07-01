@@ -25,6 +25,163 @@ const ImGuiWindowFlags modalWindowFlags =
 		ImGuiWindowFlags_NoResize |
 		ImGuiWindowFlags_NoMove;
 
+namespace {
+
+static const char* ControllerRoleLabel(vr::ETrackedControllerRole role)
+{
+	switch (role)
+	{
+	case vr::TrackedControllerRole_LeftHand: return "Left";
+	case vr::TrackedControllerRole_RightHand: return "Right";
+	case vr::TrackedControllerRole_OptOut: return "OptOut";
+	case vr::TrackedControllerRole_Treadmill: return "Treadmill";
+	case vr::TrackedControllerRole_Stylus: return "Stylus";
+	default: return "-";
+	}
+}
+
+static const char* DeviceClassLabel(vr::ETrackedDeviceClass deviceClass)
+{
+	switch (deviceClass)
+	{
+	case vr::TrackedDeviceClass_HMD: return "HMD";
+	case vr::TrackedDeviceClass_Controller: return "Controller";
+	case vr::TrackedDeviceClass_GenericTracker: return "Tracker";
+	case vr::TrackedDeviceClass_TrackingReference: return "Base";
+	default: return "Other";
+	}
+}
+
+static void CollectConnectedDevices(std::vector<VRDevice>& out)
+{
+	out.clear();
+	char buffer[vr::k_unMaxPropertyStringSize];
+
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		const auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
+		if (deviceClass == vr::TrackedDeviceClass_Invalid
+			|| deviceClass == vr::TrackedDeviceClass_TrackingReference)
+			continue;
+
+		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+		vr::VRSystem()->GetStringTrackedDeviceProperty(
+			id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
+		if (err != vr::TrackedProp_Success)
+			continue;
+
+		VRDevice device;
+		device.id = id;
+		device.deviceClass = deviceClass;
+		device.trackingSystem = buffer;
+
+		vr::VRSystem()->GetStringTrackedDeviceProperty(
+			id, vr::Prop_ModelNumber_String, buffer, vr::k_unMaxPropertyStringSize, &err);
+		device.model = err == vr::TrackedProp_Success ? std::string(buffer) : std::string{};
+
+		vr::VRSystem()->GetStringTrackedDeviceProperty(
+			id, vr::Prop_SerialNumber_String, buffer, vr::k_unMaxPropertyStringSize, &err);
+		device.serial = err == vr::TrackedProp_Success ? std::string(buffer) : std::string{};
+
+		device.controllerRole = (vr::ETrackedControllerRole) vr::VRSystem()->GetInt32TrackedDeviceProperty(
+			id, vr::Prop_ControllerRoleHint_Int32, &err);
+		out.push_back(device);
+	}
+}
+
+static void RenderEcosystemDiagnostics()
+{
+	std::vector<VRDevice> devices;
+	CollectConnectedDevices(devices);
+
+	int standableCount = 0;
+	uint32_t standableMaxIndex = 0;
+	uint32_t leftControllerIndex = vr::k_unTrackedDeviceIndexInvalid;
+	uint32_t rightControllerIndex = vr::k_unTrackedDeviceIndexInvalid;
+
+	for (const auto& device : devices)
+	{
+		if (device.trackingSystem == "standable")
+		{
+			++standableCount;
+			if (device.id > standableMaxIndex)
+				standableMaxIndex = device.id;
+		}
+
+		if (device.deviceClass == vr::TrackedDeviceClass_Controller)
+		{
+			if (device.controllerRole == vr::TrackedControllerRole_LeftHand)
+				leftControllerIndex = device.id;
+			if (device.controllerRole == vr::TrackedControllerRole_RightHand)
+				rightControllerIndex = device.id;
+		}
+	}
+
+	ImGui::Text("Ecosystem");
+	if (standableCount > 0)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+			"Standable FBE: %d virtual tracker(s), indices up to %u",
+			standableCount, standableMaxIndex);
+		ImGui::TextWrapped(
+			"Standable virtual trackers are excluded from SLAM drift sync.");
+		if (CalCtx.quitStandableOnExit)
+			ImGui::TextDisabled("Standable will close automatically when SteamVR exits.");
+		else
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+				"Auto-quit Standable on exit is OFF — quit Standable manually before closing SteamVR.");
+		if (leftControllerIndex > 10 || rightControllerIndex > 10)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+				"Controllers at high indices (L=%u R=%u) — Standable may push controller roles in some apps.",
+				leftControllerIndex == vr::k_unTrackedDeviceIndexInvalid ? 0u : leftControllerIndex,
+				rightControllerIndex == vr::k_unTrackedDeviceIndexInvalid ? 0u : rightControllerIndex);
+		}
+	}
+	else
+	{
+		ImGui::TextDisabled("Standable FBE: not detected");
+	}
+
+	if (ImGui::TreeNode("Device indices"))
+	{
+		if (devices.empty())
+			ImGui::TextDisabled("No tracked devices");
+		else if (ImGui::BeginTable("device_indices", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp))
+		{
+			ImGui::TableSetupColumn("Idx");
+			ImGui::TableSetupColumn("Class");
+			ImGui::TableSetupColumn("System");
+			ImGui::TableSetupColumn("Serial");
+			ImGui::TableSetupColumn("Role");
+			ImGui::TableHeadersRow();
+
+			for (const auto& device : devices)
+			{
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn();
+				ImGui::Text("%u", device.id);
+				ImGui::TableNextColumn();
+				ImGui::Text("%s", DeviceClassLabel(device.deviceClass));
+				ImGui::TableNextColumn();
+				ImGui::Text("%s", device.trackingSystem.c_str());
+				ImGui::TableNextColumn();
+				const char* serial = device.serial.empty() ? "-" : device.serial.c_str();
+				ImGui::TextUnformatted(serial);
+				ImGui::TableNextColumn();
+				if (device.deviceClass == vr::TrackedDeviceClass_Controller)
+					ImGui::Text("%s", ControllerRoleLabel(device.controllerRole));
+				else
+					ImGui::Text("-");
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TreePop();
+	}
+}
+
+} // namespace
+
 void UserInterface::Render(bool runningInOverlay)
 {
 	auto textWithWidth = [](const char *label, const char *text, float width) {
@@ -526,9 +683,9 @@ void UserInterface::Render(bool runningInOverlay)
 
 			if (changed)
 			{
-				SendOneEuroParams();
 				if (CalCtx.validProfile)
-					SaveProfile(CalCtx);
+					SendOneEuroParams();
+				SaveProfile(CalCtx);
 			}
 
 			ImGui::EndTabItem();
@@ -584,13 +741,25 @@ void UserInterface::Render(bool runningInOverlay)
 			runtimeSettingsChanged |= ImGui::Checkbox("Relative Calibration", &CalCtx.continuousSync);
 			ImGui::SetItemTooltip(
 				"Continuously re-aligns SLAM-tracked devices (controllers etc.) to the calibrated space\n"
-				"in the background. The headset's raw SLAM pose is compared against the tracker-driven\n"
+				"in the background. Standable FBE virtual trackers are never drift-synced.\n"
+				"The headset's raw SLAM pose is compared against the tracker-driven\n"
 				"pose to measure SLAM drift, and the correction is applied gradually and automatically.");
 
 			runtimeSettingsChanged |= ImGui::Checkbox("Sync HMD drift (advanced)", &CalCtx.syncHmdDrift);
 			ImGui::SetItemTooltip(
 				"Also applies SLAM drift correction to the HMD pose. Off by default because the HMD is\n"
 				"normally driven by the lighthouse tracker.");
+
+			runtimeSettingsChanged |= ImGui::Checkbox("Apply cal to Standable FBT", &CalCtx.applyCalToStandable);
+			ImGui::SetItemTooltip(
+				"Applies the same room calibration transform to Standable virtual body trackers.\n"
+				"Off by default — enable only if FBT avatars drift vs physical lighthouse trackers.");
+
+			runtimeSettingsChanged |= ImGui::Checkbox("Quit Standable when SteamVR exits", &CalCtx.quitStandableOnExit);
+			ImGui::SetItemTooltip(
+				"Closes Standable.exe before SteamVR shuts down to prevent vrserver crashes from\n"
+				"Standable driver PoseUpdated spam. On by default. Standable's own \"Close with SteamVR\"\n"
+				"setting only closes its UI and may still leave the process running too late.");
 
 			const bool stageSpace = IsStageTrackingSpace();
 			ImGui::BeginDisabled(stageSpace);
@@ -671,9 +840,10 @@ void UserInterface::Render(bool runningInOverlay)
 
 			ImGui::EndChild();
 
-			if (runtimeSettingsChanged && CalCtx.validProfile)
+			if (runtimeSettingsChanged)
 			{
-				ApplyRuntimeDriverSettings(settingsApplyTime);
+				if (CalCtx.validProfile)
+					ApplyRuntimeDriverSettings(settingsApplyTime);
 				SaveProfile(CalCtx);
 			}
 
@@ -803,6 +973,9 @@ void UserInterface::Render(bool runningInOverlay)
 				{
 					ImGui::TextDisabled("No calibration profile loaded");
 				}
+
+				ImGui::Separator();
+				RenderEcosystemDiagnostics();
 
 				ImGui::Separator();
 				static char profileFilePath[512] = {};

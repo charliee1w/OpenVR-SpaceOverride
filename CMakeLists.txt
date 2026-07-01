@@ -64,6 +64,7 @@ add_executable(OpenVR-SpaceOverride
     "src/overlay/Configuration.cpp"
     "src/overlay/IPCClient.cpp"
     "src/overlay/UserInterface.cpp"
+    "src/overlay/StandableQuit.cpp"
     "src/overlay/EmbeddedFiles.cpp"
 )
 

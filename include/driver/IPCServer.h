@@ -31,6 +31,7 @@ private:
 		OVERLAPPED overlap; // Used by the API
 		HANDLE pipe;
 		IPCServer *server;
+		ULONGLONG connectedAtMs = 0;
 
 		protocol::Request request;
 		protocol::Response response;

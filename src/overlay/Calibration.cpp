@@ -25,7 +25,14 @@ static std::vector<uint32_t> FindTrackerIdsBySerial(const CalibrationContext& ct
 
 void InitCalibrator()
 {
-	Driver.Connect();
+	try
+	{
+		Driver.Connect();
+	}
+	catch (const std::exception& e)
+	{
+		std::cerr << "Driver IPC not ready at startup (will retry): " << e.what() << std::endl;
+	}
 }
 
 static calibration::Pose PoseFromMatrix(vr::HmdMatrix34_t hmdMatrix)
@@ -95,6 +102,11 @@ static std::string GetDeviceTrackingSystem(uint32_t id)
 	char system[vr::k_unMaxPropertyStringSize] = {};
 	vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, system, vr::k_unMaxPropertyStringSize);
 	return std::string(system);
+}
+
+static bool IsStandableTrackingSystem(const std::string& trackingSystem)
+{
+	return trackingSystem == "standable";
 }
 
 static double AngularSpeedBetween(const Eigen::Matrix3d &cur, const Eigen::Matrix3d &prev, double dt)
@@ -925,8 +937,10 @@ static void ScanAndApplyProfile(CalibrationContext &ctx, double timeSec)
 			{
 				std::string trackingSystem(buffer);
 
-				if (id != vr::k_unTrackedDeviceIndex_Hmd
-					&& trackingSystem == ctx.targetTrackingSystem)
+				const bool applyRoomCal = trackingSystem == ctx.targetTrackingSystem
+					|| (ctx.applyCalToStandable && IsStandableTrackingSystem(trackingSystem));
+
+				if (id != vr::k_unTrackedDeviceIndex_Hmd && applyRoomCal)
 				{
 					wantTransformEnabled = true;
 					desiredTransform = {
@@ -980,7 +994,10 @@ static void ScanAndApplyProfile(CalibrationContext &ctx, double timeSec)
 			{
 				vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 				vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-				sync = err == vr::TrackedProp_Success && std::string(buffer) != ctx.targetTrackingSystem;
+				const std::string trackingSystem = err == vr::TrackedProp_Success ? std::string(buffer) : std::string{};
+				sync = !trackingSystem.empty()
+					&& trackingSystem != ctx.targetTrackingSystem
+					&& !IsStandableTrackingSystem(trackingSystem);
 			}
 		}
 
@@ -1073,6 +1090,17 @@ void ApplyRuntimeDriverSettings(double timeSec)
 		g_applied.slamSyncKnown[id] = false;
 
 	ScanAndApplyProfile(CalCtx, timeSec);
+}
+
+void ApplyProfileAfterLoad()
+{
+	CalCtx.timeLastScan = 0.0;
+	CalCtx.timeLastIpcHealthCheck = 0.0;
+
+	if (!CalCtx.validProfile)
+		return;
+
+	ApplyRuntimeDriverSettings(0.0);
 }
 
 static uint32_t FindTrackerBySerial(const CalibrationContext& ctx)
@@ -1498,7 +1526,7 @@ void CalibrationTick(double time)
 			ctx.timeLastIpcHealthCheck = time;
 		}
 
-		if ((time - ctx.timeLastScan) >= 1.0)
+		if (ctx.timeLastScan <= 0.0 || (time - ctx.timeLastScan) >= ctx.wantedUpdateInterval)
 		{
 			ScanAndApplyProfile(ctx, time);
 			ctx.timeLastScan = time;
