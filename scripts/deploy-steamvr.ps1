@@ -85,7 +85,24 @@ Write-Host "Copying overlay EXE:"
 $pfOverlayCopied = Copy-Artifact $BuildOverlayExe $InstallOverlayExe -Optional
 if (-not $pfDriverCopied -or -not $pfOverlayCopied) {
     Write-Host ""
-    Write-Host "Re-run this script as Administrator to update C:\Program Files\OpenVR-SpaceOverride\"
+    Write-Host "Program Files install needs elevation — trying admin sync..."
+    $adminSync = Join-Path $PSScriptRoot "sync-program-files-admin.ps1"
+    if (Test-Path $adminSync) {
+        try {
+            Start-Process -FilePath "pwsh" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$adminSync`"" -Verb RunAs -Wait
+            $pfDriverCopied = Test-Path $InstallDriverDll -and ((Get-FileHash $BuildDriverDll -Algorithm SHA256).Hash -eq (Get-FileHash $InstallDriverDll -Algorithm SHA256).Hash)
+            $pfOverlayCopied = Test-Path $InstallOverlayExe -and ((Get-FileHash $BuildOverlayExe -Algorithm SHA256).Hash -eq (Get-FileHash $InstallOverlayExe -Algorithm SHA256).Hash)
+            if ($pfDriverCopied -and $pfOverlayCopied) {
+                Write-Host "  OK Program Files install updated via admin sync"
+            }
+        }
+        catch {
+            Write-Host "  SKIP admin sync: $_"
+        }
+    }
+    if (-not $pfDriverCopied -or -not $pfOverlayCopied) {
+        Write-Host "Re-run as Administrator: pwsh -File `"$adminSync`""
+    }
 }
 
 Write-Host ""
