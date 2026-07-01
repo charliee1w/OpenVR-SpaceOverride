@@ -16,7 +16,7 @@ namespace
 	constexpr double BlendToSlamSec = 0.225;
 	constexpr double MinScale = 0.01;
 	constexpr double MaxScale = 100.0;
-	constexpr float MaxPredictionFrames = 3.0f;
+	constexpr float MaxPredictionFrames = 4.0f;
 	constexpr float WirelessStreamBiasFrames = 0.5f;
 	constexpr float WirelessPredictionFallbackFrames = 1.5f;
 
@@ -366,7 +366,8 @@ bool ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		trackerBlend.reset();
 		predictionTune.reset();
 		trackerHealth = {};
-		memset(slamSync, 0, sizeof slamSync);
+		// Keep slamSync[] — calibration temporarily disables the HMD tracker without
+		// intending to drop continuous sync on body trackers until profile re-applies.
 	}
 	else
 	{
@@ -420,15 +421,14 @@ bool ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 
 float ServerTrackedDeviceProvider::EffectivePredictionFrames() const
 {
-	float frames = hmdTracker.manualPredictionTime;
 	if (hmdTracker.predictionAuto)
 	{
-		frames = predictionTune.estimateValid
+		const float frames = predictionTune.estimateValid
 			? predictionTune.appliedPredictionFrames
-			: WirelessPredictionFallbackFrames;
-		frames += WirelessStreamBiasFrames;
+			: (WirelessPredictionFallbackFrames + WirelessStreamBiasFrames);
+		return std::clamp(frames, 0.0f, MaxPredictionFrames);
 	}
-	return std::clamp(frames, 0.0f, MaxPredictionFrames);
+	return std::clamp(hmdTracker.manualPredictionTime, 0.0f, MaxPredictionFrames);
 }
 
 void ServerTrackedDeviceProvider::RecordPredictionSample(
@@ -662,11 +662,6 @@ ServerTrackedDeviceProvider::HmdPoseSample ServerTrackedDeviceProvider::ResolveB
 		else
 		{
 			result = trackerBlend.fromPose;
-			if (t >= 1.0)
-			{
-				trackerBlend.active = false;
-				result.valid = trackerBlend.toPose.valid;
-			}
 		}
 	}
 	else if (trackerValid && trackerPose.valid)
@@ -785,6 +780,83 @@ ServerTrackedDeviceProvider::HmdPoseSample ServerTrackedDeviceProvider::BuildSla
 	return sample;
 }
 
+void ServerTrackedDeviceProvider::ApplyPosePrediction(
+	HmdPoseSample& pose,
+	const vr::TrackedDevicePose_t& trackerRaw,
+	double dtSec)
+{
+	if (dtSec <= 0.0 || !pose.valid || !trackerRaw.bPoseIsValid)
+		return;
+
+	double trackerVel[3] = {
+		trackerRaw.vVelocity.v[0],
+		trackerRaw.vVelocity.v[1],
+		trackerRaw.vVelocity.v[2]
+	};
+	double trackerAngVel[3] = {
+		trackerRaw.vAngularVelocity.v[0],
+		trackerRaw.vAngularVelocity.v[1],
+		trackerRaw.vAngularVelocity.v[2]
+	};
+
+	const bool trackerPlayspaceTransformActive = hmdTracker.enabled
+		&& IsValidDeviceIndex(hmdTracker.trackerID)
+		&& transforms[hmdTracker.trackerID].enabled;
+	const bool useRawTrackerKinematics = hmdTracker.native || trackerPlayspaceTransformActive;
+
+	vr::HmdVector3d_t linVel = useRawTrackerKinematics
+		? vr::HmdVector3d_t{ trackerVel[0], trackerVel[1], trackerVel[2] }
+		: quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
+
+	vr::HmdVector3d_t angVel = { 0, 0, 0 };
+	if (hmdTracker.enableAngularVelocity)
+	{
+		if (headVel.valid)
+		{
+			LARGE_INTEGER now;
+			QueryPerformanceCounter(&now);
+			double dtAng = (now.QuadPart - headVel.lastUpdate.QuadPart) / QpcFrequency();
+			if (dtAng <= 0.0 || !std::isfinite(dtAng))
+				dtAng = 1.0 / 90.0;
+			if (dtAng > 0.1)
+				dtAng = 0.1;
+			angVel = quaternionAngularVelocity(pose.rotation, headVel.prevRotation, dtAng);
+		}
+		else
+		{
+			angVel = useRawTrackerKinematics
+				? vr::HmdVector3d_t{ trackerAngVel[0], trackerAngVel[1], trackerAngVel[2] }
+				: quaternionRotateVector(hmdTracker.calibrationRotation, trackerAngVel);
+		}
+	}
+
+	vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(trackerRaw.mDeviceToAbsoluteTracking);
+	vr::HmdQuaternion_t refRot = trackerPlayspaceTransformActive
+		? trackerQuat
+		: quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
+	vr::HmdVector3d_t offset = quaternionRotateVector(
+		hmdTracker.native ? trackerQuat : refRot,
+		hmdTracker.offsetTranslation.v);
+
+	linVel.v[0] += angVel.v[1] * offset.v[2] - angVel.v[2] * offset.v[1];
+	linVel.v[1] += angVel.v[2] * offset.v[0] - angVel.v[0] * offset.v[2];
+	linVel.v[2] += angVel.v[0] * offset.v[1] - angVel.v[1] * offset.v[0];
+
+	pose.position[0] += linVel.v[0] * dtSec;
+	pose.position[1] += linVel.v[1] * dtSec;
+	pose.position[2] += linVel.v[2] * dtSec;
+
+	const double angSpeed = std::sqrt(
+		angVel.v[0] * angVel.v[0] + angVel.v[1] * angVel.v[1] + angVel.v[2] * angVel.v[2]);
+	if (angSpeed > 1e-9)
+	{
+		Eigen::AngleAxisd delta(angSpeed * dtSec, Eigen::Vector3d(angVel.v[0], angVel.v[1], angVel.v[2]) / angSpeed);
+		Eigen::Quaterniond q = VrQuatToEigen(pose.rotation);
+		q = (Eigen::Quaterniond(delta) * q).normalized();
+		pose.rotation = EigenQuatToVr(q);
+	}
+}
+
 void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 	vr::DriverPose_t& pose,
 	const HmdPoseSample& hmdPose,
@@ -884,12 +956,26 @@ void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 			hmdTracker.offsetTranslation.v);
 
 		vr::HmdVector3d_t vel = quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
+		const bool useRawTrackerLinearVel = hmdTracker.native || trackerPlayspaceTransformActive;
 
 		double dtAng = FilterStep(headVel.lastUpdate, headVel.valid);
 		vr::HmdVector3d_t headAngVel = { 0, 0, 0 };
 		if (headVel.valid)
+		{
 			headAngVel = headVel.filter.filter(
 				quaternionAngularVelocity(pose.qRotation, headVel.prevRotation, dtAng), dtAng);
+		}
+		else if (hmdTracker.enableAngularVelocity)
+		{
+			double trackerAngVel[3] = {
+				trackerPose->vAngularVelocity.v[0],
+				trackerPose->vAngularVelocity.v[1],
+				trackerPose->vAngularVelocity.v[2]
+			};
+			headAngVel = useRawTrackerLinearVel
+				? vr::HmdVector3d_t{ trackerAngVel[0], trackerAngVel[1], trackerAngVel[2] }
+				: quaternionRotateVector(hmdTracker.calibrationRotation, trackerAngVel);
+		}
 		headVel.prevRotation = pose.qRotation;
 		headVel.valid = true;
 
@@ -901,7 +987,7 @@ void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 
 		for (int i = 0; i < 3; i++)
 		{
-			double baseVel = hmdTracker.native ? trackerVel[i] : vel.v[i];
+			double baseVel = useRawTrackerLinearVel ? trackerVel[i] : vel.v[i];
 			pose.vecVelocity[i] = baseVel + tangential.v[i];
 			pose.vecAngularVelocity[i] = hmdTracker.enableAngularVelocity ? headAngVel.v[i] : 0.0;
 		}
@@ -941,7 +1027,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	bool processHmdOverride = false;
 	uint32_t trackerID = vr::k_unTrackedDeviceIndexInvalid;
-	float predictionSeconds = 0.0f;
 	bool rawValid = false;
 	vr::HmdQuaternion_t rawRotation = { 1, 0, 0, 0 };
 	double rawPosition[3] = { 0, 0, 0 };
@@ -980,8 +1065,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		processHmdOverride = true;
 		trackerID = hmdTracker.trackerID;
-		const float hz = predictionTune.displayHz > 1.0f ? predictionTune.displayHz : 90.0f;
-		predictionSeconds = (1.0f / hz) * EffectivePredictionFrames();
 
 		rawValid = pose.poseIsValid && pose.deviceIsConnected && pose.result == vr::TrackingResult_Running_OK;
 		if (rawValid)
@@ -1024,11 +1107,16 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	const HmdPoseSample trackerPose = BuildTrackerHmdPose(trackerPoseRaw);
 	const HmdPoseSample slamPose = BuildSlamHmdPose(pose, rawValid);
 
-	const HmdPoseSample blendedPose = ResolveBlendedHmdPose(
+	HmdPoseSample blendedPose = ResolveBlendedHmdPose(
 		trackerValid,
 		trackerPose,
 		slamPose,
 		rawValid);
+
+	const float predHz = predictionTune.displayHz > 1.0f ? predictionTune.displayHz : 90.0f;
+	const float predSec = (1.0f / predHz) * EffectivePredictionFrames();
+	if (predSec > 0.0f && blendedPose.valid && trackerValid)
+		ApplyPosePrediction(blendedPose, trackerPoseRaw, predSec);
 
 	const bool trackerHealthy = trackerValid && trackerPose.valid;
 	if (trackerHealthy)

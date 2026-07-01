@@ -254,7 +254,11 @@ int main(int argc, char** argv)
             if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED && event.window.windowID == SDL_GetWindowID(g_imGuiWindow->Window()))
                 g_imGuiWindow->Hide();
             if (event.type == SDL_EVENT_QUIT)
+            {
+                if (CalCtx.quitStandableOnExit)
+                    QuitStandableOnSteamVRExit();
                 g_ticking = false;
+            }
         }
 
         while (vr::VROverlay()->PollNextOverlayEvent(g_overlay->Handle(), &vr_event, sizeof(vr_event)))
@@ -310,6 +314,8 @@ int main(int argc, char** argv)
                 }
                 case vr::VREvent_TrackedDeviceUserInteractionEnded:
                 {
+                    if (CalCtx.targetID >= vr::k_unMaxTrackedDeviceCount)
+                        break;
                     auto activityLevel = vr::VRSystem()->GetTrackedDeviceActivityLevel(CalCtx.targetID);
                     if (activityLevel == vr::k_EDeviceActivityLevel_Idle && CalCtx.validProfile && !g_tracking_lost) {
                         g_tracking_lost = true;

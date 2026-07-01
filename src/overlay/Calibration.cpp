@@ -169,7 +169,7 @@ calibration::Sample CollectSample(const CalibrationContext &ctx)
 	if (!ok)
 	{
 		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+		AbortAndRestoreProfile(CalCtx);
 		return calibration::Sample();
 	}
 
@@ -410,15 +410,7 @@ void SendOneEuroParams()
 	req.setOneEuro.headEnabled = CalCtx.headFilterEnabled;
 	req.setOneEuro.head = CalCtx.headFilterParams;
 	req.setOneEuro.drift = CalCtx.driftFilterParams;
-
-	try
-	{
-		Driver.SendBlocking(req);
-	}
-	catch (const std::runtime_error &e)
-	{
-		std::cerr << "Failed to send One Euro params: " << e.what() << std::endl;
-	}
+	TrySendBlocking(req);
 }
 
 void FetchPredictionTelemetry()
@@ -1049,9 +1041,11 @@ static void ScanAndApplyProfile(CalibrationContext &ctx, double timeSec)
 			anyDriverUpdate = true;
 			g_applied.initialized = true;
 		}
-		else if (!forceApply)
+		else
 		{
-			std::cerr << "ScanAndApplyProfile: batch apply failed — will retry" << std::endl;
+			InvalidateAppliedDriverState();
+			if (!forceApply)
+				std::cerr << "ScanAndApplyProfile: batch apply failed — will retry" << std::endl;
 		}
 	}
 	else
@@ -1428,6 +1422,12 @@ void RestoreCalibrationAfterFailure()
 void StartPartialRecalibration()
 {
 	if (!CalCtx.validProfile)
+		return;
+
+	if (CalCtx.state == CalibrationState::Sampling
+		|| CalCtx.state == CalibrationState::PartialSampling
+		|| CalCtx.state == CalibrationState::Begin
+		|| CalCtx.state == CalibrationState::Editing)
 		return;
 
 	CalCtx.wantedUpdateInterval = 0.0;
