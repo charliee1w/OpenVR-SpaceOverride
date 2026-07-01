@@ -1,5 +1,16 @@
 # Changelog
 
+## 8.3.0 — upstream v8 merge (2026-07-01)
+
+### Integrated from [Nyabsi v8](https://github.com/Nyabsi/OpenVR-SpaceOverride/releases/tag/2.0.0-v8)
+- Head angular velocity derived from filtered pose rotation (not raw tracker ang vel)
+- Tangential velocity from head rotation × tracker mount offset (better nod/turn feel)
+- Profile no longer cleared on SteamVR quit (`VREvent_ProcessQuit` / `QuitAcknowledged` handling)
+- AFK auto-full-recal removed upstream — fork keeps opt-in partial recal on tracker recovery instead
+
+### Kept from fork
+- Weighted calibration solver, protocol v10, diagnostics, deploy/harden scripts, Standable coexistence
+
 ## 8.2.0 — tracking feel & ecosystem (2026-07-01)
 
 ### Driver / tracking

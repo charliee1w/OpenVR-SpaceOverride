@@ -2,4 +2,4 @@
 
 #pragma once
 
-#define SPACECAL_VERSION_STRING "8.2.0"
+#define SPACECAL_VERSION_STRING "8.3.0"

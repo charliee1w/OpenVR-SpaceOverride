@@ -149,6 +149,10 @@ Expected when **SLAM drift sync** is on — SLAM controllers are drift-corrected
 
 Diagnostics may show **Guardian shift suspect** when SLAM jumps but the tracker stays stable. Re-calibrate if playspace drifts.
 
+### VRChat full-body tracking looks wrong
+
+SpaceOverride is more precise than Space Calibrator, so VRChat IK quirks (elbow/knee pops, odd proportions) can show up more clearly. This is a VRChat IK limitation, not a SpaceOverride calibration bug — lighthouse HMDs hit the same issues. Nyabsi is exploring workarounds upstream.
+
 ### SteamVR crashes on exit with Standable FBE
 
 Standable can spam `PoseUpdated` during shutdown and take down `vrserver`. Keep **Quit Standable when SteamVR exits** enabled (default), or quit Standable manually before closing SteamVR.

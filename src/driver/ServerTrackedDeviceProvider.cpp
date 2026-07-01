@@ -125,6 +125,21 @@ static vr::HmdQuaternion_t EigenQuatToVr(const Eigen::Quaterniond& q)
 	return { n.w(), n.x(), n.y(), n.z() };
 }
 
+inline vr::HmdVector3d_t quaternionAngularVelocity(const vr::HmdQuaternion_t& cur, const vr::HmdQuaternion_t& prev, double dt) {
+	if (dt <= 0.0)
+		return { 0, 0, 0 };
+
+	vr::HmdQuaternion_t d = quaternionNormalize(cur * quaternionConjugate(prev));
+	if (d.w < 0.0) { d.w = -d.w; d.x = -d.x; d.y = -d.y; d.z = -d.z; }
+
+	double s = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+	if (s < 1e-9)
+		return { 0, 0, 0 };
+
+	double scale = (2.0 * std::atan2(s, d.w)) / (s * dt);
+	return { d.x * scale, d.y * scale, d.z * scale };
+}
+
 template < class T >
 inline vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 {
@@ -177,6 +192,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	applyDefaults(drift.translationFilter.params, filter_defaults::Off);
 	applyDefaults(headFilter.rotationFilter.params, filter_defaults::Off);
 	applyDefaults(headFilter.translationFilter.params, filter_defaults::Off);
+	headVel.filter.params = { 8.0, 1.0, 1.0 };
 
 	if (!InjectHooks(pDriverContext))
 		LOG("Pose hooks failed to install — driver will run in IPC-only mode (override inactive)");
@@ -346,6 +362,7 @@ bool ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		drift.rotationFilter.reset();
 		drift.translationFilter.reset();
 		headFilter.reset();
+		headVel.reset();
 		trackerBlend.reset();
 		predictionTune.reset();
 		trackerHealth = {};
@@ -775,6 +792,7 @@ void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 {
 	if (!hmdPose.valid)
 	{
+		headVel.reset();
 		if (!hmdTracker.slamFallback)
 		{
 			if (hmdTracker.native)
@@ -854,32 +872,43 @@ void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
 			trackerPose->vVelocity.v[2]
 		};
 
-		double trackerAngVel[3] = {
-			trackerPose->vAngularVelocity.v[0],
-			trackerPose->vAngularVelocity.v[1],
-			trackerPose->vAngularVelocity.v[2]
-		};
+		vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(trackerPose->mDeviceToAbsoluteTracking);
+		const bool trackerPlayspaceTransformActive = hmdTracker.enabled
+			&& IsValidDeviceIndex(hmdTracker.trackerID)
+			&& transforms[hmdTracker.trackerID].enabled;
+		vr::HmdQuaternion_t refRot = trackerPlayspaceTransformActive
+			? trackerQuat
+			: quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
+		vr::HmdVector3d_t offset = quaternionRotateVector(
+			hmdTracker.native ? trackerQuat : refRot,
+			hmdTracker.offsetTranslation.v);
 
 		vr::HmdVector3d_t vel = quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
-		vr::HmdVector3d_t angVel = quaternionRotateVector(hmdTracker.calibrationRotation, trackerAngVel);
 
-		if (hmdTracker.native)
+		double dtAng = FilterStep(headVel.lastUpdate, headVel.valid);
+		vr::HmdVector3d_t headAngVel = { 0, 0, 0 };
+		if (headVel.valid)
+			headAngVel = headVel.filter.filter(
+				quaternionAngularVelocity(pose.qRotation, headVel.prevRotation, dtAng), dtAng);
+		headVel.prevRotation = pose.qRotation;
+		headVel.valid = true;
+
+		vr::HmdVector3d_t tangential = {
+			headAngVel.v[1] * offset.v[2] - headAngVel.v[2] * offset.v[1],
+			headAngVel.v[2] * offset.v[0] - headAngVel.v[0] * offset.v[2],
+			headAngVel.v[0] * offset.v[1] - headAngVel.v[1] * offset.v[0]
+		};
+
+		for (int i = 0; i < 3; i++)
 		{
-			for (int i = 0; i < 3; i++)
-			{
-				pose.vecVelocity[i] = trackerVel[i];
-				pose.vecAngularVelocity[i] = hmdTracker.enableAngularVelocity ? trackerAngVel[i] : 0.0;
-			}
+			double baseVel = hmdTracker.native ? trackerVel[i] : vel.v[i];
+			pose.vecVelocity[i] = baseVel + tangential.v[i];
+			pose.vecAngularVelocity[i] = hmdTracker.enableAngularVelocity ? headAngVel.v[i] : 0.0;
 		}
-		else
-		{
-			const bool useAngVel = hmdTracker.enableAngularVelocity || !hmdTracker.native;
-			for (int i = 0; i < 3; i++)
-			{
-				pose.vecVelocity[i] = vel.v[i];
-				pose.vecAngularVelocity[i] = useAngVel ? angVel.v[i] : 0.0;
-			}
-		}
+	}
+	else
+	{
+		headVel.reset();
 	}
 
 	pose.poseIsValid = true;

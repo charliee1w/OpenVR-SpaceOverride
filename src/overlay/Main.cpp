@@ -319,6 +319,10 @@ int main(int argc, char** argv)
                 }
                 case vr::VREvent_Quit:
                     [[fallthrough]];
+                case vr::VREvent_ProcessQuit:
+                    [[fallthrough]];
+                case vr::VREvent_QuitAcknowledged:
+                    [[fallthrough]];
                 case vr::VREvent_DriverRequestedQuit:
                     [[fallthrough]];
                 case vr::VREvent_RestartRequested:

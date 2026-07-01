@@ -202,4 +202,14 @@ private:
 	HmdPoseSample BuildTrackerHmdPose(const vr::TrackedDevicePose_t& tp) const;
 	HmdPoseSample BuildSlamHmdPose(const vr::DriverPose_t& pose, bool valid) const;
 	void WriteHmdPoseToDriver(vr::DriverPose_t& pose, const HmdPoseSample& hmdPose, const vr::TrackedDevicePose_t* trackerPose);
+
+	struct HeadVelocity
+	{
+		bool valid = false;
+		LARGE_INTEGER lastUpdate = {};
+		vr::HmdQuaternion_t prevRotation = { 1, 0, 0, 0 };
+		oneeuro::Vec3 filter;
+
+		void reset() { valid = false; filter.reset(); }
+	} headVel;
 };
