@@ -42,6 +42,10 @@ mcps/
 .cursor/
 .grok/
 
+# Personal local dev scripts (do not publish)
+scripts/fix-blade-sorcery-benchmark.ps1
+scripts/restore-blade-sorcery-mods.ps1
+
 # Logs
 *.log
 *.log.old
