@@ -201,7 +201,8 @@ private:
 	HmdPoseSample ResolveBlendedHmdPose(bool trackerValid, const HmdPoseSample& trackerPose, const HmdPoseSample& slamPose, bool slamPoseValid);
 	HmdPoseSample BuildTrackerHmdPose(const vr::TrackedDevicePose_t& tp) const;
 	HmdPoseSample BuildSlamHmdPose(const vr::DriverPose_t& pose, bool valid) const;
-	void ApplyPosePrediction(HmdPoseSample& pose, const vr::TrackedDevicePose_t& trackerRaw, double dtSec);
+	bool IsFiniteHmdPoseSample(const HmdPoseSample& sample) const;
+	bool FetchTrackerPose(uint32_t trackerID, vr::TrackedDevicePose_t& outPose, bool& outValid);
 	void WriteHmdPoseToDriver(vr::DriverPose_t& pose, const HmdPoseSample& hmdPose, const vr::TrackedDevicePose_t* trackerPose);
 
 	struct HeadVelocity

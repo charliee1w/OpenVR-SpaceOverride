@@ -85,9 +85,26 @@ namespace
 	}
 }
 
+namespace
+{
+	thread_local uint32_t g_poseHookDepth = 0;
+
+	struct PoseHookDepthGuard
+	{
+		PoseHookDepthGuard() { ++g_poseHookDepth; }
+		~PoseHookDepthGuard() { --g_poseHookDepth; }
+	};
+}
+
 static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	if (IsDriverShuttingDown())
+	{
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+
+	if (g_poseHookDepth > 1)
 	{
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
@@ -100,6 +117,7 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 		return;
 	}
 	auto pose = newPose;
+	const PoseHookDepthGuard depthGuard;
 	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
 	{
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
@@ -114,6 +132,12 @@ static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevic
 		return;
 	}
 
+	if (g_poseHookDepth > 1)
+	{
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 	{
 		LogPoseSizeMismatch(unWhichDevice, unPoseStructSize);
@@ -121,6 +145,7 @@ static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevic
 		return;
 	}
 	auto pose = newPose;
+	const PoseHookDepthGuard depthGuard;
 	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
 	{
 		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);

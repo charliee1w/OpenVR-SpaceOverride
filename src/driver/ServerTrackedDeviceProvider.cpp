@@ -780,81 +780,30 @@ ServerTrackedDeviceProvider::HmdPoseSample ServerTrackedDeviceProvider::BuildSla
 	return sample;
 }
 
-void ServerTrackedDeviceProvider::ApplyPosePrediction(
-	HmdPoseSample& pose,
-	const vr::TrackedDevicePose_t& trackerRaw,
-	double dtSec)
+bool ServerTrackedDeviceProvider::IsFiniteHmdPoseSample(const HmdPoseSample& sample) const
 {
-	if (dtSec <= 0.0 || !pose.valid || !trackerRaw.bPoseIsValid)
-		return;
+	return sample.valid
+		&& IsFiniteQuat(sample.rotation)
+		&& IsFinite(sample.position[0])
+		&& IsFinite(sample.position[1])
+		&& IsFinite(sample.position[2]);
+}
 
-	double trackerVel[3] = {
-		trackerRaw.vVelocity.v[0],
-		trackerRaw.vVelocity.v[1],
-		trackerRaw.vVelocity.v[2]
-	};
-	double trackerAngVel[3] = {
-		trackerRaw.vAngularVelocity.v[0],
-		trackerRaw.vAngularVelocity.v[1],
-		trackerRaw.vAngularVelocity.v[2]
-	};
+bool ServerTrackedDeviceProvider::FetchTrackerPose(uint32_t trackerID, vr::TrackedDevicePose_t& outPose, bool& outValid)
+{
+	outPose = {};
+	outValid = false;
 
-	const bool trackerPlayspaceTransformActive = hmdTracker.enabled
-		&& IsValidDeviceIndex(hmdTracker.trackerID)
-		&& transforms[hmdTracker.trackerID].enabled;
-	const bool useRawTrackerKinematics = hmdTracker.native || trackerPlayspaceTransformActive;
+	if (!IsValidDeviceIndex(trackerID))
+		return false;
 
-	vr::HmdVector3d_t linVel = useRawTrackerKinematics
-		? vr::HmdVector3d_t{ trackerVel[0], trackerVel[1], trackerVel[2] }
-		: quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
+	const uint32_t poseCount = (std::min)(trackerID + 1, vr::k_unMaxTrackedDeviceCount);
+	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+	vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, poses, poseCount);
 
-	vr::HmdVector3d_t angVel = { 0, 0, 0 };
-	if (hmdTracker.enableAngularVelocity)
-	{
-		if (headVel.valid)
-		{
-			LARGE_INTEGER now;
-			QueryPerformanceCounter(&now);
-			double dtAng = (now.QuadPart - headVel.lastUpdate.QuadPart) / QpcFrequency();
-			if (dtAng <= 0.0 || !std::isfinite(dtAng))
-				dtAng = 1.0 / 90.0;
-			if (dtAng > 0.1)
-				dtAng = 0.1;
-			angVel = quaternionAngularVelocity(pose.rotation, headVel.prevRotation, dtAng);
-		}
-		else
-		{
-			angVel = useRawTrackerKinematics
-				? vr::HmdVector3d_t{ trackerAngVel[0], trackerAngVel[1], trackerAngVel[2] }
-				: quaternionRotateVector(hmdTracker.calibrationRotation, trackerAngVel);
-		}
-	}
-
-	vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(trackerRaw.mDeviceToAbsoluteTracking);
-	vr::HmdQuaternion_t refRot = trackerPlayspaceTransformActive
-		? trackerQuat
-		: quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
-	vr::HmdVector3d_t offset = quaternionRotateVector(
-		hmdTracker.native ? trackerQuat : refRot,
-		hmdTracker.offsetTranslation.v);
-
-	linVel.v[0] += angVel.v[1] * offset.v[2] - angVel.v[2] * offset.v[1];
-	linVel.v[1] += angVel.v[2] * offset.v[0] - angVel.v[0] * offset.v[2];
-	linVel.v[2] += angVel.v[0] * offset.v[1] - angVel.v[1] * offset.v[0];
-
-	pose.position[0] += linVel.v[0] * dtSec;
-	pose.position[1] += linVel.v[1] * dtSec;
-	pose.position[2] += linVel.v[2] * dtSec;
-
-	const double angSpeed = std::sqrt(
-		angVel.v[0] * angVel.v[0] + angVel.v[1] * angVel.v[1] + angVel.v[2] * angVel.v[2]);
-	if (angSpeed > 1e-9)
-	{
-		Eigen::AngleAxisd delta(angSpeed * dtSec, Eigen::Vector3d(angVel.v[0], angVel.v[1], angVel.v[2]) / angSpeed);
-		Eigen::Quaterniond q = VrQuatToEigen(pose.rotation);
-		q = (Eigen::Quaterniond(delta) * q).normalized();
-		pose.rotation = EigenQuatToVr(q);
-	}
+	outPose = poses[trackerID];
+	outValid = outPose.bPoseIsValid;
+	return true;
 }
 
 void ServerTrackedDeviceProvider::WriteHmdPoseToDriver(
@@ -1089,18 +1038,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	vr::TrackedDevicePose_t trackerPoseRaw{};
 	bool trackerValid = false;
-	{
-		const uint32_t poseCount = (std::min)(trackerID + 1, vr::k_unMaxTrackedDeviceCount);
-		vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
-		// Fetch tracker at t=0; compositor reprojection uses pose velocities, not predicted poses.
-		vr::VRServerDriverHost()->GetRawTrackedDevicePoses(
-			0.0f,
-			poses,
-			poseCount);
-
-		trackerPoseRaw = poses[trackerID];
-		trackerValid = trackerPoseRaw.bPoseIsValid;
-	}
+	if (!FetchTrackerPose(trackerID, trackerPoseRaw, trackerValid))
+		return true;
 
 	std::lock_guard<std::mutex> lock(stateMutex);
 
@@ -1113,10 +1052,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		slamPose,
 		rawValid);
 
-	const float predHz = predictionTune.displayHz > 1.0f ? predictionTune.displayHz : 90.0f;
-	const float predSec = (1.0f / predHz) * EffectivePredictionFrames();
-	if (predSec > 0.0f && blendedPose.valid && trackerValid)
-		ApplyPosePrediction(blendedPose, trackerPoseRaw, predSec);
+	if (!IsFiniteHmdPoseSample(blendedPose))
+	{
+		LOG("Dropping non-finite blended HMD pose");
+		blendedPose.valid = false;
+	}
 
 	const bool trackerHealthy = trackerValid && trackerPose.valid;
 	if (trackerHealthy)
