@@ -14,8 +14,9 @@ OpenVR-SpaceOverride aligns SLAM-tracked headsets (Quest via Virtual Desktop, Pi
 
 ## Quick install (pre-built package)
 
-1. Download the latest **Release** zip from [Releases](https://github.com/charliee1w/OpenVR-SpaceOverride/releases), or build locally with `scripts\build-release.ps1`.
-2. Copy `dist\steam-driver\spaceoverride\` into:
+1. Download **`SpaceOverride_Installer_8.3.0.exe`** from [Releases](https://github.com/charliee1w/OpenVR-SpaceOverride/releases) and run as **Administrator** (close SteamVR first).  
+   Or use the portable ZIP and follow `INSTALL.txt` inside.
+2. **Portable only:** copy `dist\steam-driver\spaceoverride\` into:
    ```
    Steam\steamapps\common\SteamVR\drivers\spaceoverride
    ```

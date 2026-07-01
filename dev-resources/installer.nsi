@@ -6,8 +6,12 @@
 ;--------------------------------
 ; General Configuration
 
-!define APP_VERSION "2.4.0"
-!define APP_VERSION_META "2.4.0.0"
+!ifndef APP_VERSION
+!define APP_VERSION "8.3.0"
+!endif
+!ifndef APP_VERSION_META
+!define APP_VERSION_META "8.3.0.0"
+!endif
 !define APP_NAME "OpenVR-SpaceOverride"
 
 !define INSTALL_DIR "$PROGRAMFILES64\${APP_NAME}"
@@ -16,7 +20,7 @@
 !define DRIVER_DIR "driver"
 
 Name "${APP_NAME}"
-OutFile "${APP_NAME}_Installer.exe"
+OutFile "SpaceOverride_Installer_${APP_VERSION}.exe"
 InstallDir "${INSTALL_DIR}"
 InstallDirRegKey HKLM "Software\${APP_NAME}\Main" ""
 RequestExecutionLevel admin
@@ -25,7 +29,7 @@ ShowInstDetails show
 VIProductVersion "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=1033 "FileDescription" "${APP_NAME} Installer"
-VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 Nyabsi"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Nyabsi; community fork by gore"
 VIAddVersionKey /LANG=1033 "FileVersion" "${APP_VERSION_META}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${APP_VERSION}"
 

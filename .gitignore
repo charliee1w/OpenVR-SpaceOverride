@@ -34,6 +34,10 @@ build/
 build-overlay/
 build-driver/
 dist/
+bin/
+release/
+dev-resources/OpenVR-SpaceOverride_Installer.exe
+dev-resources/SpaceOverride_Installer_*.exe
 
 # Agent / local tooling (do not publish)
 Agents.md
