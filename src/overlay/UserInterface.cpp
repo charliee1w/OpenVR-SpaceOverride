@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -87,6 +88,82 @@ static void CollectConnectedDevices(std::vector<VRDevice>& out)
 			id, vr::Prop_ControllerRoleHint_Int32, &err);
 		out.push_back(device);
 	}
+}
+
+static void PushDriverSettings(double timeSec)
+{
+	SendOneEuroParams();
+	ApplyRuntimeDriverSettings(timeSec);
+}
+
+static void RenderFilterSettingsSummary()
+{
+	ImGui::Text("UI smoothing: head %s, tundra %s",
+		CalCtx.headFilterEnabled ? "on" : "off",
+		CalCtx.tundraMode ? "on" : "off");
+	if (CalCtx.headFilterEnabled)
+	{
+		const auto& h = CalCtx.headFilterParams;
+		ImGui::TextDisabled("  Head filter: cutoff %.2f, beta %.2f, dCutoff %.2f",
+			h.minCutoff, h.beta, h.dCutoff);
+	}
+	const auto& d = CalCtx.driftFilterParams;
+	ImGui::TextDisabled("  Drift filter: cutoff %.2f, beta %.2f, dCutoff %.2f",
+		d.minCutoff, d.beta, d.dCutoff);
+}
+
+static void RenderPredictionStatus(const protocol::DriverTelemetry* driverTelemetry)
+{
+	const char* uiMode = CalCtx.predictionAuto ? "auto" : "manual";
+	const float uiFrames = CalCtx.predictionAuto ? CalCtx.autoPredictionFrames : CalCtx.predictionTime;
+	ImGui::Text("Prediction UI: %.1f frames (%s)", uiFrames, uiMode);
+
+	if (driverTelemetry)
+	{
+		ImGui::Text("Prediction driver: %.1f frames @ %.0f Hz",
+			driverTelemetry->appliedPredictionFrames,
+			driverTelemetry->displayHz);
+		const float delta = std::fabs(uiFrames - driverTelemetry->appliedPredictionFrames);
+		if (delta > 0.2f)
+		{
+			ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+				"  UI/driver mismatch — use Re-apply below or toggle a setting");
+		}
+	}
+	else if (CalCtx.validProfile)
+	{
+		ImGui::TextDisabled("Prediction driver: waiting for telemetry");
+	}
+}
+
+static void RenderRuntimeQualityHints()
+{
+	if (!CalCtx.validProfile || !CalCtx.runtimeResidualValid)
+		return;
+
+	const bool residualHigh = CalCtx.runtimeResidualMm > CalibrationContext::RuntimeResidualWarnMm;
+	const ImVec4 color = residualHigh
+		? ImVec4(0.9f, 0.35f, 0.3f, 1.0f)
+		: ImVec4(0.2f, 0.8f, 0.3f, 1.0f);
+	ImGui::TextColored(color, "Runtime mount residual: %.1f mm", CalCtx.runtimeResidualMm);
+
+	if (!residualHigh)
+		return;
+
+	if (CalCtx.runtimeResidualHighStreak > 0)
+	{
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+			"  Elevated for %d checks (~%.0f s) — mount may have shifted",
+			CalCtx.runtimeResidualHighStreak,
+			CalCtx.runtimeResidualHighStreak * 0.5);
+	}
+
+	if (CalCtx.autoPartialRecalOnMountDrift)
+		ImGui::TextWrapped("  Auto partial recal is on — will refresh offset when streak threshold is reached.");
+	else
+		ImGui::TextWrapped(
+			"  Tighten the head tracker mount, run partial recal (Edit Calibration), or enable "
+			"Auto partial recal in Settings.");
 }
 
 static void RenderEcosystemDiagnostics()
@@ -661,7 +738,7 @@ void UserInterface::Render(bool runningInOverlay)
 			}
 			ImGui::SetItemTooltip(
 				"Stronger smoothing presets for Tundra / jitter-prone mounts.\n"
-				"Requires Smooth headset tracker below.");
+				"Updates head and drift filter presets (enable Smooth headset tracker to use head presets).");
 
 			changed |= ImGui::Checkbox("Smooth headset tracker", &CalCtx.headFilterEnabled);
 			ImGui::SetItemTooltip("Steadies what you see through the headset to reduce shaking. This can add a tiny bit of delay, so if your view feels laggy when you move quickly, adjust the sliders below.");
@@ -682,7 +759,7 @@ void UserInterface::Render(bool runningInOverlay)
 
 			if (changed)
 			{
-				SendOneEuroParams();
+				PushDriverSettings(CalCtx.timeLastTick);
 				SaveProfile(CalCtx);
 			}
 
@@ -706,13 +783,11 @@ void UserInterface::Render(bool runningInOverlay)
 			if (ImGui::Checkbox("Tundra mode", &CalCtx.tundraMode))
 			{
 				ApplyFilterPresetsFromModes(CalCtx);
-				if (CalCtx.headFilterEnabled)
-					SendOneEuroParams();
 				runtimeSettingsChanged = true;
 			}
 			ImGui::SetItemTooltip(
 				"Uses stronger smoothing presets for Tundra / jitter-prone head mounts.\n"
-				"Enable Smooth headset tracker on the Smoothing tab to apply. Off by default.");
+				"Updates filter presets on the Smoothing tab (head + drift). Off by default.");
 
 			if (CalCtx.trackerTundraDetected)
 				ImGui::TextDisabled("Tundra-class tracker detected on this device");
@@ -803,10 +878,10 @@ void UserInterface::Render(bool runningInOverlay)
 				"Estimates wireless latency from tracker vs SLAM velocity over a 2 s window,\n"
 				"adds a small wireless bias, and tunes prediction to 0–4 frames. Disable for manual control.");
 
-			if (CalCtx.predictionAuto)
-			{
-				ImGui::Text("Applied: %.1f frames", CalCtx.autoPredictionFrames);
-			}
+			if (CalCtx.driverTelemetryValid)
+				RenderPredictionStatus(&CalCtx.driverTelemetry);
+			else if (CalCtx.predictionAuto)
+				ImGui::Text("Auto estimate: %.1f frames", CalCtx.autoPredictionFrames);
 
 			if (CalCtx.predictionTelemetryValid)
 			{
@@ -826,13 +901,22 @@ void UserInterface::Render(bool runningInOverlay)
 			auto speed = CalCtx.calibrationSpeed;
 
 			if (ImGui::RadioButton("Fast", speed == CalibrationContext::FAST))
+			{
 				CalCtx.calibrationSpeed = CalibrationContext::FAST;
+				SaveProfile(CalCtx);
+			}
 
 			if (ImGui::RadioButton("Slow", speed == CalibrationContext::SLOW))
+			{
 				CalCtx.calibrationSpeed = CalibrationContext::SLOW;
+				SaveProfile(CalCtx);
+			}
 
 			if (ImGui::RadioButton("Very Slow", speed == CalibrationContext::VERY_SLOW))
+			{
 				CalCtx.calibrationSpeed = CalibrationContext::VERY_SLOW;
+				SaveProfile(CalCtx);
+			}
 
 			ImGui::SetItemTooltip("Controls how long calibration deltas are collected.");
 
@@ -840,8 +924,7 @@ void UserInterface::Render(bool runningInOverlay)
 
 			if (runtimeSettingsChanged)
 			{
-				if (CalCtx.validProfile)
-					ApplyRuntimeDriverSettings(settingsApplyTime);
+				PushDriverSettings(settingsApplyTime);
 				SaveProfile(CalCtx);
 			}
 
@@ -850,6 +933,16 @@ void UserInterface::Render(bool runningInOverlay)
 			{
 				if (!CalCtx.ipcHealthy)
 					ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.3f, 1.0f), "IPC: unhealthy (driver unreachable or rejected last request)");
+
+				ImGui::BeginDisabled(!CalCtx.ipcHealthy);
+				if (ImGui::Button("Re-apply driver settings"))
+					PushDriverSettings(CalCtx.timeLastTick);
+				ImGui::EndDisabled();
+				ImGui::SetItemTooltip(
+					"Pushes smoothing, prediction, and sync settings to the driver immediately.\n"
+					"Use after SteamVR restart or if Diagnostics shows UI/driver mismatch.");
+
+				ImGui::Separator();
 
 				if (CalCtx.guardianBoundary.valid)
 				{
@@ -916,8 +1009,16 @@ void UserInterface::Render(bool runningInOverlay)
 							"  UI says %s — toggle smoothing or restart overlay if mismatched",
 							CalCtx.headFilterEnabled ? "on" : "off");
 
+					const bool syncExpected = CalCtx.continuousSync;
 					ImGui::Text("SLAM drift sync (driver): %s",
 						t.slamSyncActive ? "active" : "off");
+					if (syncExpected != t.slamSyncActive)
+						ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+							"  UI Relative Calibration is %s — Re-apply if wrong",
+							syncExpected ? "on" : "off");
+
+					RenderFilterSettingsSummary();
+					RenderPredictionStatus(&t);
 
 					if (t.driftValid)
 					{
@@ -927,9 +1028,6 @@ void UserInterface::Render(bool runningInOverlay)
 					else
 						ImGui::TextDisabled("Drift state: not accumulating");
 
-					ImGui::Text("Prediction: %.1f frames @ %.0f Hz",
-						t.appliedPredictionFrames,
-						t.displayHz);
 				}
 				else
 				{
@@ -948,22 +1046,20 @@ void UserInterface::Render(bool runningInOverlay)
 					if (CalCtx.lastCalibrationRmsMm > 0.0)
 						ImGui::Text("Last calibration RMS: %.1f mm", CalCtx.lastCalibrationRmsMm);
 
-					if (CalCtx.runtimeResidualValid)
-					{
-						const ImVec4 color = CalCtx.runtimeResidualMm <= CalibrationContext::RuntimeResidualWarnMm
-							? ImVec4(0.2f, 0.8f, 0.3f, 1.0f)
-							: ImVec4(0.9f, 0.35f, 0.3f, 1.0f);
-						ImGui::TextColored(color, "Runtime mount residual: %.1f mm", CalCtx.runtimeResidualMm);
-					}
+					RenderRuntimeQualityHints();
 
 					if (CalCtx.guardianShiftSuspect)
 						ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
 							"Guardian shift suspect (SLAM jump %.0f mm, tracker stable)", CalCtx.guardianShiftSlamJumpMm);
 
 					if (CalCtx.mountRigidityWarning)
+					{
 						ImGui::TextColored(ImVec4(0.9f, 0.35f, 0.3f, 1.0f),
 							"Mount rigidity warning: partial RMS %.1f mm vs baseline %.1f mm",
 							CalCtx.lastPartialMountRmsMm, CalCtx.baselineMountRmsMm);
+						ImGui::TextWrapped(
+							"  Head tracker mount may be flexing — tighten strap/screws or re-run calibration.");
+					}
 
 					ImGui::Text("Tundra mode: %s%s",
 						CalCtx.tundraMode ? "on" : "off",

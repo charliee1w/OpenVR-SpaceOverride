@@ -92,7 +92,7 @@ struct CalibrationContext
 	bool syncHmdDrift = false;
 	bool applyCalToStandable = false;
 	bool quitStandableOnExit = true;
-	float predictionTime = 1.0f;
+	float predictionTime = 0.0f;
 	bool predictionAuto = false;
 	float predictionLagMs = 0.0f;
 	float predictionLagFrames = 0.0f;

@@ -107,7 +107,7 @@ static void LoadSettingsFields(CalibrationContext &ctx, const picojson::object &
 	if (obj.count("predictionTime") && obj.at("predictionTime").is<double>())
 		ctx.predictionTime = obj.at("predictionTime").get<double>();
 	else if (!obj.count("predictionTime"))
-		ctx.predictionTime = 1.0;
+		ctx.predictionTime = 0.0;
 	RequireFinite(ctx.predictionTime, "predictionTime");
 	ctx.predictionTime = std::clamp(ctx.predictionTime, 0.0f, 4.0f);
 
