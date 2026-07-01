@@ -6,11 +6,12 @@ labels: bug
 assignees: ''
 ---
 
-**Version:** (Settings tab, e.g. 8.0.0)
+**Version:** (Settings tab, e.g. 8.2.0)
 
 **Setup:**
 - HMD / streamer (VD, ALVR, etc.):
 - Trackers:
+- Other drivers (Standable FBE, SmoothTracking, etc.):
 - SteamVR version:
 
 **Steps to reproduce:**
@@ -23,11 +24,17 @@ assignees: ''
 - Pose hooks:
 - Driver override:
 - Override:
+- Head smoothing (driver):
+- SLAM drift sync (driver):
 - IPC:
 
 **Scripts output** (if possible):
 ```
-.\scripts\debug-steamvr.ps1
+.\scripts\validate-install.ps1
+.\scripts\analyze-vr-logs.ps1
 ```
 
-**Driver log** (last ~30 lines from `SteamVR\space_calibrator_driver.log` or `%LOCALAPPDATA%\openvr\logs\`):
+**Driver log** (last ~30 lines from `%LOCALAPPDATA%\openvr\logs\space_calibrator_driver.log`):
+```
+paste here
+```

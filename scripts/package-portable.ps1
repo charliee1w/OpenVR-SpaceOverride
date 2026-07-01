@@ -45,7 +45,7 @@ Copy-Item $IconPng (Join-Path $OverlayRoot "icon.png") -Force
 Copy-Item $Manifest $OverlayRoot -Force
 
 $readme = @"
-OpenVR-SpaceOverride portable package (v8+)
+OpenVR-SpaceOverride portable package (v8.2+)
 
 1. Copy the entire steam-driver\spaceoverride folder to:
    Steam\steamapps\common\SteamVR\drivers\spaceoverride
@@ -58,7 +58,14 @@ OpenVR-SpaceOverride portable package (v8+)
 3. Restart SteamVR. Open Space Override from the dashboard.
    Press Calibrate and follow on-screen instructions.
 
-4. Verify: Settings tab -> Diagnostics should show pose hooks installed and override active.
+4. Verify: Settings -> Diagnostics should show pose hooks installed and override active.
+
+Defaults (v8.2+): head smoothing off, SLAM drift sync off, prediction 0 frames.
+Enable smoothing or drift sync only if you need them.
+
+From the repo scripts folder (optional):
+  .\scripts\harden-steamvr-stack.ps1
+  .\scripts\validate-install.ps1
 
 See README.md in the repo for troubleshooting.
 "@

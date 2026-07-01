@@ -1,5 +1,31 @@
 # Changelog
 
+## 8.2.0 — tracking feel & ecosystem (2026-07-01)
+
+### Driver / tracking
+- Protocol **v10**: driver telemetry includes `headFilterEnabled` and `slamSyncActive`
+- Head smoothing (One Euro) decoupled from drift filter — disabling smoothing no longer affects drift correction
+- **SLAM drift sync** only runs when explicitly enabled (no drift work at boot)
+- Head smoothing **off by default** for new/migrated profiles
+- Prediction default **0 frames**; prediction auto-tune **off** by default for new profiles
+
+### Overlay / UX
+- Settings ↔ driver sync: diagnostics show live driver filter state; **Re-apply driver settings** button
+- Ecosystem panel: Standable FBE detection, controller index warnings, quit-on-exit status
+- **Tundra mode** is user-toggleable (no longer auto-enabled from calibration jitter)
+- Auto partial recal and other auto behaviors are opt-in
+
+### Ecosystem
+- **Quit Standable when SteamVR exits** (default on) — closes `Standable.exe` before SteamVR teardown
+- Registry split: calibration `Config` vs runtime prefs `ConfigPrefs`
+- Profile applies correctly after overlay load (`ApplyProfileAfterLoad`)
+
+### Scripts / install
+- `harden-steamvr-stack.ps1` — canonical manifest, vrpathreg cleanup, smoke test
+- `analyze-vr-logs.ps1` — post-session audit for SpaceOverride, Standable, compositor drops
+- `deploy-steamvr.ps1` — prefers Program Files manifest; Steam drivers folder is canonical DLL path
+- `remove-stale-install.ps1` / `prune-driver-log.ps1` — legacy path fixes
+
 ## 8.1.0 — wireless feel pass (2026-06-29)
 
 ### Logging
