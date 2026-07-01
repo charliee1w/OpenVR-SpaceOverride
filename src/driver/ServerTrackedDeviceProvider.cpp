@@ -173,10 +173,10 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		out.dCutoff = defaults.dCutoff;
 	};
 
-	applyDefaults(drift.rotationFilter.params, filter_defaults::Drift);
-	applyDefaults(drift.translationFilter.params, filter_defaults::Drift);
-	applyDefaults(headFilter.rotationFilter.params, filter_defaults::Head);
-	applyDefaults(headFilter.translationFilter.params, filter_defaults::Head);
+	applyDefaults(drift.rotationFilter.params, filter_defaults::Off);
+	applyDefaults(drift.translationFilter.params, filter_defaults::Off);
+	applyDefaults(headFilter.rotationFilter.params, filter_defaults::Off);
+	applyDefaults(headFilter.translationFilter.params, filter_defaults::Off);
 
 	if (!InjectHooks(pDriverContext))
 		LOG("Pose hooks failed to install — driver will run in IPC-only mode (override inactive)");
@@ -210,6 +210,26 @@ void ServerTrackedDeviceProvider::RunFrame()
 	UpdateDisplayHz();
 	if (hmdTracker.enabled && hmdTracker.predictionAuto)
 		UpdatePredictionAutoTune();
+}
+
+bool ServerTrackedDeviceProvider::AnySlamSyncEnabled() const
+{
+	for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+	{
+		if (slamSync[i])
+			return true;
+	}
+	return false;
+}
+
+void ServerTrackedDeviceProvider::InvalidateDriftIfSlamSyncInactive()
+{
+	if (AnySlamSyncEnabled())
+		return;
+
+	drift.valid = false;
+	drift.rotationFilter.reset();
+	drift.translationFilter.reset();
 }
 
 void ServerTrackedDeviceProvider::RecomputePoseWorkActive()
@@ -352,6 +372,7 @@ bool ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 
 	std::lock_guard<std::mutex> lock(stateMutex);
 	slamSync[cmd.openVRID] = cmd.enabled;
+	InvalidateDriftIfSlamSyncInactive();
 	RecomputePoseWorkActive();
 	return true;
 }
@@ -368,21 +389,15 @@ bool ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 	};
 
 	const protocol::OneEuroParams& headParams = cmd.headEnabled ? cmd.head : filter_defaults::Off;
-	const protocol::OneEuroParams& driftParams = cmd.headEnabled ? cmd.drift : filter_defaults::Off;
 
 	headFilter.rotationFilter.params = toParams(headParams);
 	headFilter.translationFilter.params = toParams(headParams);
-	drift.rotationFilter.params = toParams(driftParams);
-	drift.translationFilter.params = toParams(driftParams);
+	drift.rotationFilter.params = toParams(cmd.drift);
+	drift.translationFilter.params = toParams(cmd.drift);
 
 	if (headFilter.enabled && !cmd.headEnabled)
 		headFilter.reset();
 	headFilter.enabled = cmd.headEnabled;
-	if (drift.valid && !cmd.headEnabled)
-	{
-		drift.rotationFilter.reset();
-		drift.translationFilter.reset();
-	}
 	return true;
 }
 
@@ -493,6 +508,8 @@ protocol::DriverTelemetry ServerTrackedDeviceProvider::GetDriverTelemetry() cons
 	telemetry.appliedPredictionFrames = EffectivePredictionFrames();
 	telemetry.displayHz = predictionTune.displayHz;
 	telemetry.driftValid = drift.valid;
+	telemetry.headFilterEnabled = headFilter.enabled;
+	telemetry.slamSyncActive = AnySlamSyncEnabled();
 
 	if (!telemetry.poseHooksInstalled)
 		telemetry.overrideInactiveReason = protocol::DriverOverrideHooksMissing;
@@ -1045,7 +1062,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		}
 	}
 
-	if (trackerValid && trackerPose.valid && rawValid && !trackerBlend.active)
+	if (AnySlamSyncEnabled() && trackerValid && trackerPose.valid && rawValid && !trackerBlend.active)
 	{
 		double trackerVel[3] = {
 			trackerPoseRaw.vVelocity.v[0],

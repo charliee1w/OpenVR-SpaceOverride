@@ -1097,6 +1097,8 @@ void ApplyProfileAfterLoad()
 	CalCtx.timeLastScan = 0.0;
 	CalCtx.timeLastIpcHealthCheck = 0.0;
 
+	SendOneEuroParams();
+
 	if (!CalCtx.validProfile)
 		return;
 

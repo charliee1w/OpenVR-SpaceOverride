@@ -13,7 +13,7 @@
 
 namespace protocol
 {
-	constexpr uint32_t Version = 9;
+	constexpr uint32_t Version = 10;
 	constexpr uint32_t MaxTrackedDevices = 64;
 
 	enum RequestType
@@ -157,6 +157,8 @@ namespace protocol
 		float displayHz = 90.0f;
 		bool driftValid = false;
 		bool trackerBlendActive = false;
+		bool headFilterEnabled = false;
+		bool slamSyncActive = false;
 	};
 
 	struct ApplyBatch

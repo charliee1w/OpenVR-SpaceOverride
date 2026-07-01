@@ -673,18 +673,16 @@ void UserInterface::Render(bool runningInOverlay)
 			ImGui::EndDisabled();
 
 			ImGui::Spacing();
-			ImGui::SeparatorText("Relative Calibration");
+			ImGui::SeparatorText("Relative Calibration (drift)");
 			ImGui::TextWrapped(
-				"Keeps your controllers and other tracked devices lined up with your real space, and "
-				"steadies your view if the headset briefly loses tracking. Add more smoothing if they "
-				"look shaky; ease off if they are slow to line up.");
+				"Smooths SLAM drift correction when Relative Calibration is enabled in Settings. "
+				"Independent of Smooth headset tracker above — drift sliders apply even when head smoothing is off.");
 			ImGui::Spacing();
 			changed |= paramSliders("drift", CalCtx.driftFilterParams);
 
 			if (changed)
 			{
-				if (CalCtx.validProfile)
-					SendOneEuroParams();
+				SendOneEuroParams();
 				SaveProfile(CalCtx);
 			}
 
@@ -911,13 +909,23 @@ void UserInterface::Render(bool runningInOverlay)
 					if (t.trackerBlendActive)
 						ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Tracker/SLAM blend active");
 
+					ImGui::Text("Head smoothing (driver): %s",
+						t.headFilterEnabled ? "on" : "off");
+					if (t.headFilterEnabled != CalCtx.headFilterEnabled)
+						ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f),
+							"  UI says %s — toggle smoothing or restart overlay if mismatched",
+							CalCtx.headFilterEnabled ? "on" : "off");
+
+					ImGui::Text("SLAM drift sync (driver): %s",
+						t.slamSyncActive ? "active" : "off");
+
 					if (t.driftValid)
 					{
 						ImGui::Text("Drift yaw: %.1f deg", t.driftYawDeg);
 						ImGui::Text("Drift translation: %.1f mm", t.driftTranslationMm);
 					}
 					else
-						ImGui::TextDisabled("Drift correction: inactive");
+						ImGui::TextDisabled("Drift state: not accumulating");
 
 					ImGui::Text("Prediction: %.1f frames @ %.0f Hz",
 						t.appliedPredictionFrames,

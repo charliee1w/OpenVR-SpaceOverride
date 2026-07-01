@@ -59,6 +59,8 @@ private:
 	mutable std::mutex stateMutex;
 	std::atomic<bool> poseWorkActive{ false };
 	void RecomputePoseWorkActive();
+	bool AnySlamSyncEnabled() const;
+	void InvalidateDriftIfSlamSyncInactive();
 
 	struct DeviceTransform
 	{
