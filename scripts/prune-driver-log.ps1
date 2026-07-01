@@ -1,13 +1,14 @@
 # Remove or rotate oversized space_calibrator_driver.log files (SteamVR must be stopped).
 param(
     [double]$WarnMb = 100,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$LegacyOnly
 )
 
 $ErrorActionPreference = "Stop"
 
-$paths = @(
-    "$env:LOCALAPPDATA\openvr\logs\space_calibrator_driver.log",
+$PrimaryLog = "$env:LOCALAPPDATA\openvr\logs\space_calibrator_driver.log"
+$LegacyLogs = @(
     "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\bin\win64\space_calibrator_driver.log",
     "C:\Program Files (x86)\Steam\steamapps\common\SteamVR\space_calibrator_driver.log"
 )
@@ -17,34 +18,42 @@ if (Get-Process -Name vrserver,vrcompositor -ErrorAction SilentlyContinue) {
     exit 1
 }
 
-$removed = 0
-foreach ($path in $paths) {
-    if (-not (Test-Path $path)) { continue }
+function Prune-LogFile([string]$Path, [switch]$AlwaysIfPresent) {
+    if (-not (Test-Path $Path)) { return 0 }
 
-    $item = Get-Item $path
+    $item = Get-Item $Path
     $sizeMb = [math]::Round($item.Length / 1MB, 1)
-    if ($sizeMb -lt $WarnMb -and -not $Force) {
-        Write-Host "OK   $path ($sizeMb MB)" -ForegroundColor Green
-        continue
+    $shouldPrune = $AlwaysIfPresent -or ($Force -and $LegacyOnly) -or ($sizeMb -ge $WarnMb)
+    if (-not $shouldPrune) {
+        Write-Host "OK   $Path ($sizeMb MB)" -ForegroundColor Green
+        return 0
     }
 
-    $backup = "$path.pruned-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     if ($sizeMb -ge 1024) {
-        Write-Host "DELETE $path ($sizeMb MB) - legacy spam log" -ForegroundColor Yellow
-        Remove-Item $path -Force
+        Write-Host "DELETE $Path ($sizeMb MB) - legacy spam log" -ForegroundColor Yellow
+        Remove-Item $Path -Force
     }
     else {
-        Write-Host "RENAME $path ($sizeMb MB) -> $backup" -ForegroundColor Yellow
-        Move-Item $path $backup
+        $backup = "$Path.pruned-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Write-Host "RENAME $Path ($sizeMb MB) -> $backup" -ForegroundColor Yellow
+        Move-Item $Path $backup
     }
-    $removed++
+    return 1
 }
 
-foreach ($path in $paths) {
+$removed = 0
+
+if (-not $LegacyOnly) {
+    $removed += Prune-LogFile $PrimaryLog
+}
+
+foreach ($path in $LegacyLogs) {
+    # Legacy SteamVR-folder logs are always stale for current builds; remove on -Force.
+    $removed += Prune-LogFile $path -AlwaysIfPresent:($Force -or $LegacyOnly)
     $old = "$path.old"
     if (Test-Path $old) {
         $sizeMb = [math]::Round((Get-Item $old).Length / 1MB, 1)
-        if ($sizeMb -ge $WarnMb) {
+        if ($Force -or $LegacyOnly -or $sizeMb -ge $WarnMb) {
             Write-Host "DELETE $old ($sizeMb MB)" -ForegroundColor Yellow
             Remove-Item $old -Force
             $removed++
@@ -53,8 +62,8 @@ foreach ($path in $paths) {
 }
 
 if ($removed -eq 0) {
-    Write-Host "No oversized driver logs found." -ForegroundColor Green
+    Write-Host "No driver logs needed pruning." -ForegroundColor Green
 }
 else {
-    Write-Host "Pruned $removed log file(s). New builds log to %LOCALAPPDATA%\openvr\logs\" -ForegroundColor Green
+    Write-Host "Pruned $removed log file(s). Active log: $PrimaryLog" -ForegroundColor Green
 }

@@ -111,6 +111,29 @@ catch {
 }
 
 Write-Host ""
+Write-Host "Overlay manifest registration:"
+$AppConfig = "C:\Program Files (x86)\Steam\config\appconfig.json"
+$CanonicalManifest = "C:\Program Files\OpenVR-SpaceOverride\manifest.vrmanifest"
+if (Test-Path $AppConfig) {
+    $paths = (Get-Content $AppConfig -Raw | ConvertFrom-Json).manifest_paths
+    $spacePaths = @($paths | Where-Object { $_ -match 'OpenVR-SpaceOverride' })
+    if ($spacePaths.Count -eq 1 -and $spacePaths[0] -eq $CanonicalManifest) {
+        Write-Host "OK   appconfig uses Program Files manifest" -ForegroundColor Green
+    }
+    elseif ($spacePaths.Count -eq 0) {
+        Write-Host "WARN no SpaceOverride manifest in appconfig" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "WARN stale/duplicate SpaceOverride manifest paths:" -ForegroundColor Yellow
+        $spacePaths | ForEach-Object { Write-Host "       $_" }
+        $failures += "appconfig has stale SpaceOverride manifest registration"
+    }
+}
+else {
+    Write-Host "WARN appconfig.json missing" -ForegroundColor Yellow
+}
+
+Write-Host ""
 Write-Host "SteamVR process:"
 if (Get-Process -Name "vrserver" -ErrorAction SilentlyContinue) {
     Write-Host "NOTE SteamVR is running - restart to load new driver DLL if just deployed" -ForegroundColor Yellow
