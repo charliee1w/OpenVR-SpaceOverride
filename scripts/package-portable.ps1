@@ -67,7 +67,7 @@ From the repo scripts folder (optional):
   .\scripts\harden-steamvr-stack.ps1
   .\scripts\validate-install.ps1
 
-Fork maintained by charliee1w — see README.md in the repo for troubleshooting.
+Fork maintained by gore — see README.md in the repo for troubleshooting.
 "@
 Set-Content -Path (Join-Path $OverlayRoot "INSTALL.txt") -Value $readme -Encoding UTF8
 

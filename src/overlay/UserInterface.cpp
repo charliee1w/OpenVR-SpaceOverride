@@ -614,7 +614,7 @@ void UserInterface::Render(bool runningInOverlay)
 			ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
 			ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 			ImGui::Text("OpenVR-SpaceOverride v%s (community fork)", SPACECAL_VERSION_STRING);
-			ImGui::TextDisabled("Maintained by charliee1w");
+			ImGui::TextDisabled("Maintained by gore");
 			ImGui::TextDisabled("Based on Nyabsi/SpaceOverride; calibration math from OpenVR-SpaceCalibrator");
 			if (runningInOverlay)
 			{
@@ -1125,7 +1125,7 @@ void UserInterface::Render(bool runningInOverlay)
 				ImGui::Separator();
 				if (ImGui::CollapsingHeader("Credits", ImGuiTreeNodeFlags_DefaultOpen))
 				{
-					ImGui::Text("Fork maintained by charliee1w");
+					ImGui::Text("Fork maintained by gore");
 					ImGui::TextDisabled("github.com/charliee1w/OpenVR-SpaceOverride");
 					ImGui::TextDisabled("Based on Nyabsi/OpenVR-SpaceOverride");
 					ImGui::TextDisabled("Calibration math heritage: pushrax/OpenVR-SpaceCalibrator");
