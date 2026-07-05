@@ -6,6 +6,15 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "Main.h"
 
+#include <atomic>
+
+static std::atomic<bool> g_driverShuttingDown{ false };
+
+void SetDriverShuttingDown(bool shuttingDown)
+{
+	g_driverShuttingDown.store(shuttingDown, std::memory_order_release);
+}
+
 static Hook<void*(*)(void*, const char *, vr::EVRInitError *)>
 	GetGenericInterfaceHook("IVRDriverContext::GetGenericInterface");
 
@@ -17,6 +26,11 @@ static Hook<void(*)(void*, uint32_t, const vr::DriverPose_t &, uint32_t)>
 
 static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	if (g_driverShuttingDown.load(std::memory_order_acquire))
+	{
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
@@ -29,6 +43,11 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 
 static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	if (g_driverShuttingDown.load(std::memory_order_acquire))
+	{
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
 	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);

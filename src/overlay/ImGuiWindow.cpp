@@ -16,6 +16,8 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <math.h>
+#include <stdexcept>
+#include <string>
 
 #include "EmbeddedFiles.h"
 
@@ -38,24 +40,12 @@ auto ImGuiWindow::Initialize(VulkanRenderer*& renderer, VrOverlay*& overlay, con
 
     auto sdl_window_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_HIDDEN | SDL_WINDOW_MOUSE_FOCUS;
     window_ = SDL_CreateWindow(name, width, height, sdl_window_flags);
-    if (window_ == nullptr) {
-#ifdef _WIN32
-        MessageBoxA(NULL, SDL_GetError(), "Space Override", MB_OK);
-#else
-        printf("SDL_CreateWindow(): %s\n", SDL_GetError());
-#endif
-        return;
-    }
+    if (window_ == nullptr)
+        throw std::runtime_error(std::string("SDL_CreateWindow(): ") + SDL_GetError());
 
     VkSurfaceKHR surface = {};
-    if (SDL_Vulkan_CreateSurface(window_, renderer->Instance(), renderer->Allocator(), &surface) == 0) {
-#ifdef _WIN32
-        MessageBoxA(NULL, SDL_GetError(), "Space Override", MB_OK);
-#else
-        printf("SDL_Vulkan_CreateSurface(): %s\n", SDL_GetError());
-#endif
-        return;
-    }
+    if (SDL_Vulkan_CreateSurface(window_, renderer->Instance(), renderer->Allocator(), &surface) == 0)
+        throw std::runtime_error(std::string("SDL_Vulkan_CreateSurface(): ") + SDL_GetError());
 
     Vulkan_Window* window = &window_data_;
     renderer->SetupWindow(window, surface, width, height);

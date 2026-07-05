@@ -325,7 +325,9 @@ static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eige
 	return std::sqrt(accum / (double)samples.size());
 }
 
-Sample CollectSample(const CalibrationContext &ctx)
+static void AbortAndRestoreProfile(CalibrationContext &ctx);
+
+Sample CollectSample(CalibrationContext &ctx)
 {
 	vr::TrackedDevicePose_t reference, target;
 	reference.bPoseIsValid = false;
@@ -346,7 +348,7 @@ Sample CollectSample(const CalibrationContext &ctx)
 	if (!ok)
 	{
 		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+		AbortAndRestoreProfile(ctx);
 		return Sample();
 	}
 

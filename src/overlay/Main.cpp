@@ -130,6 +130,13 @@ int main(int argc, char** argv)
 {
 #ifdef _WIN32
     ShowWindow(GetConsoleWindow(), SW_HIDE);
+
+    HANDLE single_instance_mutex = CreateMutexW(nullptr, TRUE, L"Local\\Nyabsi.SpaceOverride.SingleInstance");
+    if (single_instance_mutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
+        ReleaseMutex(single_instance_mutex);
+        CloseHandle(single_instance_mutex);
+        return EXIT_SUCCESS;
+    }
 #endif
     HandleCommandLine(argc, argv);
 

@@ -113,17 +113,20 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
-	LOG("OpenVR-SpaceOverride unloaded");
-	CloseLogFile();
-
-	TRACE("ServerTrackedDeviceProvider::Cleanup()");
+	LOG("OpenVR-SpaceOverride unloading");
+	SetDriverShuttingDown(true);
 	server.Stop();
 	DisableHooks();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
+	LOG("OpenVR-SpaceOverride unloaded");
+	CloseLogFile();
 }
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
 {
+	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
 	auto& tf = transforms[newTransform.openVRID];
 	tf.enabled = newTransform.enabled;
 
@@ -139,6 +142,13 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
+	if (cmd.hmdID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
+	// Disable requests use k_unTrackedDeviceIndexInvalid (0xFFFFFFFF); only validate trackerID when enabling.
+	if (cmd.enabled && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -218,6 +228,9 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
+	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
+		return true;
+
 	auto& tf = transforms[openVRID];
 	if (tf.enabled && !hmdTracker.native)
 	{
@@ -258,10 +271,17 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
 
-			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
+			double displayHz = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
+			if (displayHz < 1.0)
+				displayHz = 90.0;
 
-			const auto& tp = poses[hmdTracker.trackerID];
+			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / displayHz) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
+
+			static const vr::TrackedDevicePose_t invalidTrackerPose{};
+			const auto& tp = (hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount)
+				? poses[hmdTracker.trackerID]
+				: invalidTrackerPose;
 			if (tp.bPoseIsValid)
 			{
 				vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(tp.mDeviceToAbsoluteTracking);

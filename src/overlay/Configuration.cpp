@@ -303,6 +303,12 @@ void LoadProfile(CalibrationContext &ctx)
 
 void SaveProfile(CalibrationContext &ctx)
 {
+	if (!ctx.validProfile)
+	{
+		WriteRegistryKey("");
+		return;
+	}
+
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream io;

@@ -4,22 +4,33 @@
 #include "Logging.h"
 #include <chrono>
 
-FILE *LogFile;
+FILE *LogFile = stderr;
+static bool logFileOwned = false;
 
 void OpenLogFile()
 {
-	LogFile = fopen("space_calibrator_driver.log", "a");
-	if (LogFile == nullptr)
+	FILE *file = fopen("space_calibrator_driver.log", "a");
+	if (file == nullptr)
 	{
 		LogFile = stderr;
+		logFileOwned = false;
+		return;
 	}
+
+	if (logFileOwned && LogFile != nullptr && LogFile != stderr)
+		fclose(LogFile);
+
+	LogFile = file;
+	logFileOwned = true;
 }
 
 void CloseLogFile()
 {
-	int result = fclose(LogFile);
-	if (result != 0)
-		std::exit(EXIT_FAILURE);
+	if (logFileOwned && LogFile != nullptr && LogFile != stderr)
+		fclose(LogFile);
+
+	LogFile = stderr;
+	logFileOwned = false;
 }
 
 tm TimeForLog()
@@ -33,5 +44,6 @@ tm TimeForLog()
 
 void LogFlush()
 {
-	fflush(LogFile);
+	if (LogFile)
+		fflush(LogFile);
 }

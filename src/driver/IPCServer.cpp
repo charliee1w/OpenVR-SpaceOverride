@@ -35,6 +35,7 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 
 	default:
 		LOG("Invalid IPC request: %d", request.type);
+		response.type = protocol::ResponseInvalid;
 		break;
 	}
 }
