@@ -592,32 +592,42 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
+	// Write the desired transform once per device. Do not disable-all then re-enable:
+	// that races the pose thread and briefly publishes uncalibrated poses (far jumps).
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 
-		// The headset is driven from the tracker, so every device keeps its raw pose;
-		// clear any space-warp offset that an older profile may have applied.
-		ResetAndDisableOffsets(id);
+		// HMD pose is replaced from the head tracker; never space-warp it.
+		if (id == vr::k_unTrackedDeviceIndex_Hmd)
+		{
+			ResetAndDisableOffsets(id);
+			continue;
+		}
 
 		if (!ctx.enabled)
+		{
+			ResetAndDisableOffsets(id);
 			continue;
+		}
 
 		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
 
 		if (err != vr::TrackedProp_Success)
+		{
+			ResetAndDisableOffsets(id);
 			continue;
+		}
 
 		std::string trackingSystem(buffer);
 
-		if (id == vr::k_unTrackedDeviceIndex_Hmd)
-			continue;
-
+		// Head-mounted lighthouse tracker is the HMD pose source; keep its raw pose.
 		if (deviceClass == vr::TrackedDeviceClass_GenericTracker && trackingSystem == ctx.targetTrackingSystem && id == ctx.targetID)
 		{
+			ResetAndDisableOffsets(id);
 			continue;
 		}
 
@@ -632,6 +642,10 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 				deviceScale
 			};
 			Driver.SendBlocking(req);
+		}
+		else
+		{
+			ResetAndDisableOffsets(id);
 		}
 	}
 

@@ -47,7 +47,7 @@ public:
 
 private:
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
-		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3]);
+		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double weight = 1.0);
 	void ApplyDrift(vr::DriverPose_t &pose) const;
 
 	double SlamToCorrectedScale() const

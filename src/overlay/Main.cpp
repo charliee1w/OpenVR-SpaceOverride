@@ -283,13 +283,7 @@ int main(int argc, char** argv)
                     break;
                 }
                 case vr::VREvent_Quit:
-                    [[fallthrough]];
-                case vr::VREvent_ProcessQuit:
-                    [[fallthrough]];
-                case vr::VREvent_QuitAcknowledged:
-                    [[fallthrough]];
                 case vr::VREvent_DriverRequestedQuit:
-                    [[fallthrough]];
                 case vr::VREvent_RestartRequested:
                 {
                     // CalCtx.Clear();
@@ -297,6 +291,11 @@ int main(int argc, char** argv)
                     g_ticking = false;
                     break;
                 }
+                // ProcessQuit / QuitAcknowledged fire when other OpenVR clients exit
+                // (tools, body drivers). Do not treat those as our own shutdown.
+                case vr::VREvent_ProcessQuit:
+                case vr::VREvent_QuitAcknowledged:
+                    break;
             }
         }
 

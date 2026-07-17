@@ -6,6 +6,17 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "Main.h"
 
+#include <atomic>
+#include <cstdint>
+
+static std::atomic<bool> g_driverShuttingDown{ false };
+static thread_local uint32_t g_poseHookDepth = 0;
+
+void SetDriverShuttingDown(bool shuttingDown)
+{
+	g_driverShuttingDown.store(shuttingDown, std::memory_order_release);
+}
+
 static Hook<void*(*)(void*, const char *, vr::EVRInitError *)>
 	GetGenericInterfaceHook("IVRDriverContext::GetGenericInterface");
 
@@ -17,26 +28,53 @@ static Hook<void(*)(void*, uint32_t, const vr::DriverPose_t &, uint32_t)>
 
 static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	if (g_driverShuttingDown.load(std::memory_order_acquire))
+	{
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
-	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
+
+	// GetRawTrackedDevicePoses inside the override can re-enter this detour.
+	if (g_poseHookDepth > 0)
+	{
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+
+	++g_poseHookDepth;
 	auto pose = newPose;
 	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
 	{
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
 	}
+	--g_poseHookDepth;
 }
 
 static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	if (g_driverShuttingDown.load(std::memory_order_acquire))
+	{
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
-	//TRACE("ServerTrackedDeviceProvider::DetourTrackedDevicePoseUpdated(%d)", unWhichDevice);
+
+	if (g_poseHookDepth > 0)
+	{
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+
+	++g_poseHookDepth;
 	auto pose = newPose;
 	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
 	{
 		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
 	}
+	--g_poseHookDepth;
 }
 
 static void *DetourGetGenericInterface(void* _this, const char *pchInterfaceVersion, vr::EVRInitError *peError)
@@ -58,7 +96,7 @@ static void *DetourGetGenericInterface(void* _this, const char *pchInterfaceVers
 		if (!IHook::Exists(TrackedDevicePoseUpdatedHook006.name))
 		{
 			TrackedDevicePoseUpdatedHook006.CreateHookInObjectVTable(originalInterface, 1, &DetourTrackedDevicePoseUpdated006);
-			IHook::Register(&TrackedDevicePoseUpdatedHook006); 
+			IHook::Register(&TrackedDevicePoseUpdatedHook006);
 		}
 	}
 
@@ -67,6 +105,8 @@ static void *DetourGetGenericInterface(void* _this, const char *pchInterfaceVers
 
 void InjectHooks(vr::IVRDriverContext *pDriverContext)
 {
+	g_driverShuttingDown.store(false, std::memory_order_release);
+
 	auto err = MH_Initialize();
 	if (err == MH_OK)
 	{

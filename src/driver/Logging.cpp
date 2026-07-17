@@ -17,9 +17,13 @@ void OpenLogFile()
 
 void CloseLogFile()
 {
-	int result = fclose(LogFile);
-	if (result != 0)
-		std::exit(EXIT_FAILURE);
+	if (LogFile == nullptr || LogFile == stderr)
+	{
+		LogFile = nullptr;
+		return;
+	}
+	fclose(LogFile);
+	LogFile = nullptr;
 }
 
 tm TimeForLog()

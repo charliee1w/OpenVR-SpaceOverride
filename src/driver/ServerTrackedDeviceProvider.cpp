@@ -117,17 +117,20 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
-	LOG("OpenVR-SpaceOverride unloaded");
-	CloseLogFile();
-
-	TRACE("ServerTrackedDeviceProvider::Cleanup()");
+	LOG("OpenVR-SpaceOverride unloading");
+	SetDriverShuttingDown(true);
 	server.Stop();
 	DisableHooks();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
+	LOG("OpenVR-SpaceOverride unloaded");
+	CloseLogFile();
 }
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
 {
+	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
 	auto& tf = transforms[newTransform.openVRID];
 	tf.enabled = newTransform.enabled;
 
@@ -143,6 +146,13 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
+	if (cmd.hmdID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
+	// Disable uses k_unTrackedDeviceIndexInvalid; only validate trackerID when enabling.
+	if (cmd.enabled && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -195,9 +205,47 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 	headFilter.enabled = cmd.headEnabled;
 }
 
-void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
-	const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3])
+static double SoftGateWeight(double speed, double softMax, double hardMax)
 {
+	if (hardMax <= softMax)
+		return speed <= softMax ? 1.0 : 0.0;
+	if (speed <= softMax)
+		return 1.0;
+	if (speed >= hardMax)
+		return 0.0;
+	double t = (speed - softMax) / (hardMax - softMax);
+	// Smoothstep so the gate eases out instead of clipping.
+	t = t * t * (3.0 - 2.0 * t);
+	return 1.0 - t;
+}
+
+static vr::HmdQuaternion_t NlerpQuat(const vr::HmdQuaternion_t& a, const vr::HmdQuaternion_t& b, double t)
+{
+	double dot = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+	vr::HmdQuaternion_t bb = b;
+	if (dot < 0.0)
+	{
+		bb.w = -bb.w; bb.x = -bb.x; bb.y = -bb.y; bb.z = -bb.z;
+		dot = -dot;
+	}
+	double u = 1.0 - t;
+	vr::HmdQuaternion_t r = {
+		u * a.w + t * bb.w,
+		u * a.x + t * bb.x,
+		u * a.y + t * bb.y,
+		u * a.z + t * bb.z
+	};
+	return quaternionNormalize(r);
+}
+
+void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correctedRotation, const double(&correctedPosition)[3],
+	const vr::HmdQuaternion_t& rawRotation, const double(&rawPosition)[3], double weight)
+{
+	if (weight <= 0.0)
+		return;
+	if (weight > 1.0)
+		weight = 1.0;
+
 	vr::HmdQuaternion_t instRot = quaternionProjectYaw(quaternionNormalize(correctedRotation * quaternionConjugate(rawRotation)));
 	vr::HmdVector3d_t instRotatedRaw = quaternionRotateVector(instRot, rawPosition);
 
@@ -207,6 +255,15 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 		correctedPosition[1] - instRotatedRaw.v[1] * slamScale,
 		correctedPosition[2] - instRotatedRaw.v[2] * slamScale
 	};
+
+	// Soft gate: blend new measurement toward the current drift estimate when moving fast.
+	if (weight < 1.0 && drift.valid)
+	{
+		instRot = NlerpQuat(drift.rotation, instRot, weight);
+		instTrans.v[0] = drift.translation.v[0] + (instTrans.v[0] - drift.translation.v[0]) * weight;
+		instTrans.v[1] = drift.translation.v[1] + (instTrans.v[1] - drift.translation.v[1]) * weight;
+		instTrans.v[2] = drift.translation.v[2] + (instTrans.v[2] - drift.translation.v[2]) * weight;
+	}
 
 	double dt = FilterStep(drift.lastUpdate, drift.valid);
 
@@ -238,6 +295,9 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
+	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
+		return true;
+
 	auto& tf = transforms[openVRID];
 	if (tf.enabled && !hmdTracker.native)
 	{
@@ -278,20 +338,62 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
 
-			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
+			double displayHz = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
+			if (displayHz < 1.0)
+				displayHz = 90.0;
 
-			const auto& tp = poses[hmdTracker.trackerID];
-			if (tp.bPoseIsValid)
+			// Unpredicted fetch: predicted GetRaw can teleport on a bad velocity sample.
+			// Compositor reprojection uses the velocities we write on the HMD pose.
+			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+			vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, poses, vr::k_unMaxTrackedDeviceCount);
+
+			static const vr::TrackedDevicePose_t invalidTrackerPose{};
+			const auto& tp = (hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount)
+				? poses[hmdTracker.trackerID]
+				: invalidTrackerPose;
+
+			double trackerVel[3] = { tp.vVelocity.v[0], tp.vVelocity.v[1], tp.vVelocity.v[2] };
+			double trackerAngVel[3] = { tp.vAngularVelocity.v[0], tp.vAngularVelocity.v[1], tp.vAngularVelocity.v[2] };
+			const double linSpeed = sqrt(
+				trackerVel[0] * trackerVel[0] +
+				trackerVel[1] * trackerVel[1] +
+				trackerVel[2] * trackerVel[2]);
+
+			// bPoseIsValid alone is not enough; reject impossible kinematics (optical glitches).
+			const double maxAcceptLinSpeed = 8.0;
+			const bool trackerPoseOk = tp.bPoseIsValid
+				&& tp.bDeviceIsConnected
+				&& tp.eTrackingResult == vr::TrackingResult_Running_OK
+				&& linSpeed <= maxAcceptLinSpeed;
+
+			if (trackerPoseOk)
 			{
 				vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(tp.mDeviceToAbsoluteTracking);
 
 				vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
 
-				vr::HmdVector3d_t filteredTrackerPos = trackerFilter.translation.update({
+				double rawTrackerPos[3] = {
 					tp.mDeviceToAbsoluteTracking.m[0][3],
 					tp.mDeviceToAbsoluteTracking.m[1][3],
 					tp.mDeviceToAbsoluteTracking.m[2][3]
+				};
+
+				// Local prediction from velocity (honors predictionTime without GetRaw predict).
+				float predFrames = hmdTracker.predictionTime;
+				if (predFrames < 0.0f) predFrames = 0.0f;
+				if (predFrames > 10.0f) predFrames = 10.0f;
+				const double predSec = (1.0 / displayHz) * (double)predFrames;
+				if (predSec > 0.0)
+				{
+					rawTrackerPos[0] += trackerVel[0] * predSec;
+					rawTrackerPos[1] += trackerVel[1] * predSec;
+					rawTrackerPos[2] += trackerVel[2] * predSec;
+				}
+
+				vr::HmdVector3d_t filteredTrackerPos = trackerFilter.translation.update({
+					rawTrackerPos[0],
+					rawTrackerPos[1],
+					rawTrackerPos[2]
 				});
 				double trackerPos[3] = {
 					filteredTrackerPos.v[0],
@@ -345,18 +447,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.vecPosition[2] = headPos.v[2];
 				}
 
-				double trackerVel[3] = {
-					tp.vVelocity.v[0],
-					tp.vVelocity.v[1],
-					tp.vVelocity.v[2]
-				};
-
-				double trackerAngVel[3] = {
-					tp.vAngularVelocity.v[0],
-					tp.vAngularVelocity.v[1],
-					tp.vAngularVelocity.v[2]
-				};
-
 				vr::HmdVector3d_t vel = quaternionRotateVector(hmdTracker.calibrationRotation, trackerVel);
 				vel.v[0] *= hmdTracker.calibrationScale;
 				vel.v[1] *= hmdTracker.calibrationScale;
@@ -390,26 +480,27 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 				if (rawValid)
 				{
-					double linSpeed = sqrt(
-						trackerVel[0] * trackerVel[0] +
-						trackerVel[1] * trackerVel[1] +
-						trackerVel[2] * trackerVel[2]);
-
 					double angSpeed = sqrt(
 						trackerAngVel[0] * trackerAngVel[0] +
 						trackerAngVel[1] * trackerAngVel[1] +
 						trackerAngVel[2] * trackerAngVel[2]);
 
-					const double maxLinSpeed = 2.75;
-					const double maxAngSpeed = 3.5;
+					// Soft gate: full weight below soft caps, zero past hard caps, blend between.
+					// Avoids hard lock→jump when turning quickly through the old 2.75/3.5 cliffs.
+					const double softLin = 1.5, hardLin = 3.5;
+					const double softAng = 2.0, hardAng = 5.0;
+					double weight = SoftGateWeight(linSpeed, softLin, hardLin)
+						* SoftGateWeight(angSpeed, softAng, hardAng);
 
-					if (!drift.valid || (linSpeed < maxLinSpeed && angSpeed < maxAngSpeed))
-						UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition);
+					if (!drift.valid)
+						UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition, 1.0);
+					else if (weight > 0.01)
+						UpdateDrift(pose.qRotation, pose.vecPosition, rawRotation, rawPosition, weight);
 				}
 			}
 			else {
+				// Brief LOS/glitch: keep Kalman so reacquire does not snap from a reset filter.
 				headVel.reset();
-				trackerFilter.reset();
 				if (!hmdTracker.slamFallback) {
 					if (hmdTracker.native) {
 						pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
