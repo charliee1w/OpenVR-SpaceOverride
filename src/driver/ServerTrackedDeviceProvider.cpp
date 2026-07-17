@@ -163,6 +163,34 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	if (cmd.enabled && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
 		return;
 
+	const double newScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
+	const double newHmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
+
+	const bool changed =
+		hmdTracker.enabled != cmd.enabled
+		|| hmdTracker.native != cmd.native
+		|| hmdTracker.slamFallback != cmd.slamFallback
+		|| hmdTracker.enableAngularVelocity != cmd.enableAngularVelocity
+		|| hmdTracker.predictionTime != cmd.predictionTime
+		|| hmdTracker.hmdID != cmd.hmdID
+		|| hmdTracker.trackerID != cmd.trackerID
+		|| hmdTracker.calibrationScale != newScale
+		|| hmdTracker.hmdScale != newHmdScale
+		|| hmdTracker.offsetRotation.w != cmd.offsetRotation.w
+		|| hmdTracker.offsetRotation.x != cmd.offsetRotation.x
+		|| hmdTracker.offsetRotation.y != cmd.offsetRotation.y
+		|| hmdTracker.offsetRotation.z != cmd.offsetRotation.z
+		|| hmdTracker.offsetTranslation.v[0] != cmd.offsetTranslation.v[0]
+		|| hmdTracker.offsetTranslation.v[1] != cmd.offsetTranslation.v[1]
+		|| hmdTracker.offsetTranslation.v[2] != cmd.offsetTranslation.v[2]
+		|| hmdTracker.calibrationRotation.w != cmd.calibrationRotation.w
+		|| hmdTracker.calibrationRotation.x != cmd.calibrationRotation.x
+		|| hmdTracker.calibrationRotation.y != cmd.calibrationRotation.y
+		|| hmdTracker.calibrationRotation.z != cmd.calibrationRotation.z
+		|| hmdTracker.calibrationTranslation.v[0] != cmd.calibrationTranslation.v[0]
+		|| hmdTracker.calibrationTranslation.v[1] != cmd.calibrationTranslation.v[1]
+		|| hmdTracker.calibrationTranslation.v[2] != cmd.calibrationTranslation.v[2];
+
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -174,19 +202,23 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	hmdTracker.offsetTranslation = cmd.offsetTranslation;
 	hmdTracker.calibrationRotation = cmd.calibrationRotation;
 	hmdTracker.calibrationTranslation = cmd.calibrationTranslation;
-	hmdTracker.calibrationScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
-	hmdTracker.hmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
+	hmdTracker.calibrationScale = newScale;
+	hmdTracker.hmdScale = newHmdScale;
 
-	LOG("SetHmdTracker enabled=%d native=%d slamFallback=%d pred=%.2f hmd=%u tracker=%u scale=%.5f hmdScale=%.5f eAngVel=%d",
-		cmd.enabled ? 1 : 0,
-		cmd.native ? 1 : 0,
-		cmd.slamFallback ? 1 : 0,
-		cmd.predictionTime,
-		cmd.hmdID,
-		cmd.trackerID,
-		hmdTracker.calibrationScale,
-		hmdTracker.hmdScale,
-		cmd.enableAngularVelocity ? 1 : 0);
+	// Log only real changes (overlay scan used to spam this every second).
+	if (changed)
+	{
+		LOG("SetHmdTracker enabled=%d native=%d slamFallback=%d pred=%.2f hmd=%u tracker=%u scale=%.5f hmdScale=%.5f eAngVel=%d",
+			cmd.enabled ? 1 : 0,
+			cmd.native ? 1 : 0,
+			cmd.slamFallback ? 1 : 0,
+			cmd.predictionTime,
+			cmd.hmdID,
+			cmd.trackerID,
+			hmdTracker.calibrationScale,
+			hmdTracker.hmdScale,
+			cmd.enableAngularVelocity ? 1 : 0);
+	}
 
 	if (!cmd.enabled)
 	{

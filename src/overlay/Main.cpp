@@ -348,6 +348,7 @@ int main(int argc, char** argv)
         g_last_frame_time = now;
     }
 
+    // SaveProfile itself no-ops when !validProfile (avoids wiping a good registry cal).
     SaveProfile(CalCtx);
 
     VkResult vk_result = vkDeviceWaitIdle(g_vulkanRenderer->Device());

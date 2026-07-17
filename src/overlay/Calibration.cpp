@@ -19,9 +19,81 @@
 static IPCClient Driver;
 CalibrationContext CalCtx;
 
+// Last commands successfully sent to the driver. Scan runs every ~1s; skip no-ops.
+struct AppliedDeviceTransform
+{
+	bool known = false;
+	bool enabled = false;
+	vr::HmdVector3d_t translation = { 0, 0, 0 };
+	vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+	double scale = 1.0;
+};
+
+static AppliedDeviceTransform g_appliedTf[vr::k_unMaxTrackedDeviceCount];
+static bool g_appliedSlamKnown[vr::k_unMaxTrackedDeviceCount];
+static bool g_appliedSlam[vr::k_unMaxTrackedDeviceCount];
+static protocol::SetHmdTracker g_appliedHmd{};
+static bool g_appliedHmdKnown = false;
+static protocol::SetOneEuro g_appliedOneEuro{};
+static bool g_appliedOneEuroKnown = false;
+
+static void InvalidateAppliedDriverState()
+{
+	for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+	{
+		g_appliedTf[i] = AppliedDeviceTransform{};
+		g_appliedSlamKnown[i] = false;
+		g_appliedSlam[i] = false;
+	}
+	g_appliedHmdKnown = false;
+	g_appliedOneEuroKnown = false;
+}
+
+static bool ApproxEq(double a, double b, double eps = 1e-9)
+{
+	return std::fabs(a - b) <= eps;
+}
+
+static bool VecEq(const vr::HmdVector3d_t &a, const vr::HmdVector3d_t &b)
+{
+	return ApproxEq(a.v[0], b.v[0]) && ApproxEq(a.v[1], b.v[1]) && ApproxEq(a.v[2], b.v[2]);
+}
+
+static bool QuatEq(const vr::HmdQuaternion_t &a, const vr::HmdQuaternion_t &b)
+{
+	// Same rotation if equal or negated (q and -q).
+	bool same = ApproxEq(a.w, b.w) && ApproxEq(a.x, b.x) && ApproxEq(a.y, b.y) && ApproxEq(a.z, b.z);
+	bool neg = ApproxEq(a.w, -b.w) && ApproxEq(a.x, -b.x) && ApproxEq(a.y, -b.y) && ApproxEq(a.z, -b.z);
+	return same || neg;
+}
+
+static bool HmdTrackerEq(const protocol::SetHmdTracker &a, const protocol::SetHmdTracker &b)
+{
+	return a.hmdID == b.hmdID
+		&& a.trackerID == b.trackerID
+		&& a.enabled == b.enabled
+		&& a.native == b.native
+		&& a.slamFallback == b.slamFallback
+		&& a.enableAngularVelocity == b.enableAngularVelocity
+		&& ApproxEq(a.predictionTime, b.predictionTime, 1e-4)
+		&& QuatEq(a.offsetRotation, b.offsetRotation)
+		&& VecEq(a.offsetTranslation, b.offsetTranslation)
+		&& QuatEq(a.calibrationRotation, b.calibrationRotation)
+		&& VecEq(a.calibrationTranslation, b.calibrationTranslation)
+		&& ApproxEq(a.calibrationScale, b.calibrationScale)
+		&& ApproxEq(a.hmdScale, b.hmdScale);
+}
+
+static bool OneEuroEq(const protocol::OneEuroParams &a, const protocol::OneEuroParams &b)
+{
+	return ApproxEq(a.minCutoff, b.minCutoff) && ApproxEq(a.beta, b.beta) && ApproxEq(a.dCutoff, b.dCutoff);
+}
+
 void InitCalibrator()
 {
 	Driver.Connect();
+	// Driver is fresh after connect; force a full push on the next scan.
+	InvalidateAppliedDriverState();
 }
 
 struct Pose
@@ -475,17 +547,43 @@ vr::HmdVector3d_t VRTranslationVec(Eigen::Vector3d transcm)
 	return vrTrans;
 }
 
-void ResetAndDisableOffsets(uint32_t id)
+static void ApplyDeviceTransform(uint32_t id, bool enabled, const vr::HmdVector3d_t &translation,
+	const vr::HmdQuaternion_t &rotation, double scale)
 {
-	vr::HmdVector3d_t zeroV;
-	zeroV.v[0] = zeroV.v[1] = zeroV.v[2] = 0;
+	if (id >= vr::k_unMaxTrackedDeviceCount)
+		return;
 
-	vr::HmdQuaternion_t zeroQ;
-	zeroQ.x = 0; zeroQ.y = 0; zeroQ.z = 0; zeroQ.w = 1;
+	auto &prev = g_appliedTf[id];
+	if (prev.known
+		&& prev.enabled == enabled
+		&& (!enabled || (VecEq(prev.translation, translation) && QuatEq(prev.rotation, rotation) && ApproxEq(prev.scale, scale))))
+	{
+		return;
+	}
 
 	protocol::Request req(protocol::RequestSetDeviceTransform);
-	req.setDeviceTransform = { id, false, zeroV, zeroQ, 1.0 };
+	if (enabled)
+		req.setDeviceTransform = { id, true, translation, rotation, scale };
+	else
+	{
+		vr::HmdVector3d_t zeroV{ 0, 0, 0 };
+		vr::HmdQuaternion_t zeroQ{ 1, 0, 0, 0 };
+		req.setDeviceTransform = { id, false, zeroV, zeroQ, 1.0 };
+	}
 	Driver.SendBlocking(req);
+
+	prev.known = true;
+	prev.enabled = enabled;
+	prev.translation = translation;
+	prev.rotation = rotation;
+	prev.scale = scale;
+}
+
+void ResetAndDisableOffsets(uint32_t id)
+{
+	vr::HmdVector3d_t zeroV{ 0, 0, 0 };
+	vr::HmdQuaternion_t zeroQ{ 1, 0, 0, 0 };
+	ApplyDeviceTransform(id, false, zeroV, zeroQ, 1.0);
 }
 
 void SendOneEuroParams()
@@ -495,9 +593,19 @@ void SendOneEuroParams()
 	req.setOneEuro.head = CalCtx.headFilterParams;
 	req.setOneEuro.drift = CalCtx.driftFilterParams;
 
+	if (g_appliedOneEuroKnown
+		&& g_appliedOneEuro.headEnabled == req.setOneEuro.headEnabled
+		&& OneEuroEq(g_appliedOneEuro.head, req.setOneEuro.head)
+		&& OneEuroEq(g_appliedOneEuro.drift, req.setOneEuro.drift))
+	{
+		return;
+	}
+
 	try
 	{
 		Driver.SendBlocking(req);
+		g_appliedOneEuro = req.setOneEuro;
+		g_appliedOneEuroKnown = true;
 	}
 	catch (const std::runtime_error &e)
 	{
@@ -521,7 +629,13 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.calibrationTranslation = VRTranslationVec(CalCtx.calibratedTranslation);
 	req.setHmdTracker.calibrationScale = CalCtx.calibratedScale;
 	req.setHmdTracker.hmdScale = CalCtx.hmdScale;
+
+	if (g_appliedHmdKnown && HmdTrackerEq(g_appliedHmd, req.setHmdTracker))
+		return;
+
 	Driver.SendBlocking(req);
+	g_appliedHmd = req.setHmdTracker;
+	g_appliedHmdKnown = true;
 }
 
 // https://stackoverflow.com/questions/12374087/average-of-multiple-quaternions/27410865
@@ -633,15 +747,12 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		if (trackingSystem == ctx.targetTrackingSystem) {
 			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id) / ctx.targetModelScale;
-			protocol::Request req(protocol::RequestSetDeviceTransform);
-			req.setDeviceTransform = {
+			ApplyDeviceTransform(
 				id,
 				true,
 				VRTranslationVec(ctx.calibratedTranslation),
 				VRRotationQuat(ctx.calibratedRotation),
-				deviceScale
-			};
-			Driver.SendBlocking(req);
+				deviceScale);
 		}
 		else
 		{
@@ -668,9 +779,14 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			sync = err == vr::TrackedProp_Success && std::string(buffer) != ctx.targetTrackingSystem;
 		}
 
+		if (g_appliedSlamKnown[id] && g_appliedSlam[id] == sync)
+			continue;
+
 		protocol::Request req(protocol::RequestSetSlamSync);
 		req.setSlamSync = { id, sync };
 		Driver.SendBlocking(req);
+		g_appliedSlamKnown[id] = true;
+		g_appliedSlam[id] = sync;
 	}
 
 	if (overrideActive)

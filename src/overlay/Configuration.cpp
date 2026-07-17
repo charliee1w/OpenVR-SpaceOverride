@@ -320,6 +320,13 @@ void LoadProfile(CalibrationContext &ctx)
 
 void SaveProfile(CalibrationContext &ctx)
 {
+	// Never overwrite a good registry profile with empty/invalid state (e.g. clean exit mid-setup).
+	if (!ctx.validProfile)
+	{
+		std::cout << "Skipping profile save (no valid profile)" << std::endl;
+		return;
+	}
+
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream io;
