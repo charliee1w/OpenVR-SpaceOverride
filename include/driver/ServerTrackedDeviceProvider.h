@@ -124,4 +124,22 @@ private:
 
 		void reset() { valid = false; filter.reset(); }
 	} headVel;
+
+	// Auto session diagnostics (starts with driver load — no user action).
+	struct SessionDiag
+	{
+		bool haveLastHmdPos = false;
+		double lastHmdPos[3] = { 0, 0, 0 };
+		bool lastTrackerOk = false;
+		bool trackerStateKnown = false;
+		uint64_t frames = 0;
+		uint64_t trackerOkFrames = 0;
+		uint64_t trackerBadFrames = 0;
+		uint64_t jumpEvents = 0;
+		uint64_t speedRejects = 0;
+		uint64_t fallbackFrames = 0;
+		LARGE_INTEGER lastHeartbeat = {};
+		LARGE_INTEGER lastJumpLog = {};
+		LARGE_INTEGER lastBadLog = {};
+	} diag;
 };

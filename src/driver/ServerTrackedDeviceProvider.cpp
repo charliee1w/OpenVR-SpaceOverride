@@ -95,9 +95,12 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 	OpenLogFile();
 	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
+	LOG("auto-log session: %s", GetSessionLogPath()[0] ? GetSessionLogPath() : "(cwd fallback)");
+	LOG("auto-log: events=tracker_ok/bad, speed_reject, hmd_jump>0.35m, enable/disable, 60s heartbeat");
 
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
+	diag = SessionDiag{};
 
 	drift.rotationFilter.params = { 3.0, 1.3, 0.6 };
 	drift.translationFilter.params = { 3.0, 1.3, 0.6 };
@@ -117,6 +120,13 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
+	LOG("session stats: frames=%llu tracker_ok=%llu tracker_bad=%llu jumps=%llu speed_reject=%llu fallback=%llu",
+		(unsigned long long)diag.frames,
+		(unsigned long long)diag.trackerOkFrames,
+		(unsigned long long)diag.trackerBadFrames,
+		(unsigned long long)diag.jumpEvents,
+		(unsigned long long)diag.speedRejects,
+		(unsigned long long)diag.fallbackFrames);
 	LOG("OpenVR-SpaceOverride unloading");
 	SetDriverShuttingDown(true);
 	server.Stop();
@@ -167,6 +177,17 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	hmdTracker.calibrationScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
 	hmdTracker.hmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
 
+	LOG("SetHmdTracker enabled=%d native=%d slamFallback=%d pred=%.2f hmd=%u tracker=%u scale=%.5f hmdScale=%.5f eAngVel=%d",
+		cmd.enabled ? 1 : 0,
+		cmd.native ? 1 : 0,
+		cmd.slamFallback ? 1 : 0,
+		cmd.predictionTime,
+		cmd.hmdID,
+		cmd.trackerID,
+		hmdTracker.calibrationScale,
+		hmdTracker.hmdScale,
+		cmd.enableAngularVelocity ? 1 : 0);
+
 	if (!cmd.enabled)
 	{
 		drift.valid = false;
@@ -176,6 +197,8 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		headVel.reset();
 		trackerFilter.reset();
 		memset(slamSync, 0, sizeof slamSync);
+		diag.haveLastHmdPos = false;
+		diag.trackerStateKnown = false;
 	}
 }
 
@@ -361,10 +384,70 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 			// bPoseIsValid alone is not enough; reject impossible kinematics (optical glitches).
 			const double maxAcceptLinSpeed = 8.0;
+			const bool speedReject = tp.bPoseIsValid && tp.bDeviceIsConnected
+				&& tp.eTrackingResult == vr::TrackingResult_Running_OK
+				&& linSpeed > maxAcceptLinSpeed;
 			const bool trackerPoseOk = tp.bPoseIsValid
 				&& tp.bDeviceIsConnected
 				&& tp.eTrackingResult == vr::TrackingResult_Running_OK
 				&& linSpeed <= maxAcceptLinSpeed;
+
+			++diag.frames;
+			if (trackerPoseOk)
+				++diag.trackerOkFrames;
+			else
+				++diag.trackerBadFrames;
+			if (speedReject)
+				++diag.speedRejects;
+
+			// Rate-limited state transitions (auto-log, no user action).
+			{
+				LARGE_INTEGER now{}, freq{};
+				QueryPerformanceCounter(&now);
+				QueryPerformanceFrequency(&freq);
+				const double nowSec = now.QuadPart / (double)freq.QuadPart;
+
+				if (!diag.trackerStateKnown || diag.lastTrackerOk != trackerPoseOk)
+				{
+					bool allowLog = true;
+					if (diag.lastBadLog.QuadPart != 0)
+					{
+						double since = (now.QuadPart - diag.lastBadLog.QuadPart) / (double)freq.QuadPart;
+						if (since < 0.25)
+							allowLog = false;
+					}
+					if (allowLog)
+					{
+						LOG("tracker %s valid=%d connected=%d result=%d speed=%.2f reject_speed=%d",
+							trackerPoseOk ? "OK" : "BAD",
+							tp.bPoseIsValid ? 1 : 0,
+							tp.bDeviceIsConnected ? 1 : 0,
+							(int)tp.eTrackingResult,
+							linSpeed,
+							speedReject ? 1 : 0);
+						diag.lastBadLog = now;
+					}
+					diag.lastTrackerOk = trackerPoseOk;
+					diag.trackerStateKnown = true;
+				}
+
+				if (diag.lastHeartbeat.QuadPart == 0)
+					diag.lastHeartbeat = now;
+				double hb = (now.QuadPart - diag.lastHeartbeat.QuadPart) / (double)freq.QuadPart;
+				if (hb >= 60.0)
+				{
+					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu speed_rej=%llu fallback=%llu enabled=%d",
+						(unsigned long long)diag.frames,
+						(unsigned long long)diag.trackerOkFrames,
+						(unsigned long long)diag.trackerBadFrames,
+						(unsigned long long)diag.jumpEvents,
+						(unsigned long long)diag.speedRejects,
+						(unsigned long long)diag.fallbackFrames,
+						hmdTracker.enabled ? 1 : 0);
+					diag.lastHeartbeat = now;
+				}
+				(void)nowSec;
+			}
 
 			if (trackerPoseOk)
 			{
@@ -478,6 +561,47 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				pose.shouldApplyHeadModel = false;
 				pose.poseTimeOffset = 0;
 
+				// Detect large HMD world jumps (meters) after override write.
+				{
+					const double px = pose.vecPosition[0];
+					const double py = pose.vecPosition[1];
+					const double pz = pose.vecPosition[2];
+					if (diag.haveLastHmdPos)
+					{
+						const double dx = px - diag.lastHmdPos[0];
+						const double dy = py - diag.lastHmdPos[1];
+						const double dz = pz - diag.lastHmdPos[2];
+						const double dist = sqrt(dx * dx + dy * dy + dz * dz);
+						const double jumpThresh = 0.35; // 35 cm in one pose update is not human
+						if (dist > jumpThresh)
+						{
+							++diag.jumpEvents;
+							LARGE_INTEGER now{}, freq{};
+							QueryPerformanceCounter(&now);
+							QueryPerformanceFrequency(&freq);
+							bool allow = true;
+							if (diag.lastJumpLog.QuadPart != 0)
+							{
+								double since = (now.QuadPart - diag.lastJumpLog.QuadPart) / (double)freq.QuadPart;
+								if (since < 0.5)
+									allow = false;
+							}
+							if (allow)
+							{
+								LOG("HMD_JUMP dist=%.3fm pos=(%.2f,%.2f,%.2f) prev=(%.2f,%.2f,%.2f) speed=%.2f pred=%.2f",
+									dist, px, py, pz,
+									diag.lastHmdPos[0], diag.lastHmdPos[1], diag.lastHmdPos[2],
+									linSpeed, hmdTracker.predictionTime);
+								diag.lastJumpLog = now;
+							}
+						}
+					}
+					diag.lastHmdPos[0] = px;
+					diag.lastHmdPos[1] = py;
+					diag.lastHmdPos[2] = pz;
+					diag.haveLastHmdPos = true;
+				}
+
 				if (rawValid)
 				{
 					double angSpeed = sqrt(
@@ -501,6 +625,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			else {
 				// Brief LOS/glitch: keep Kalman so reacquire does not snap from a reset filter.
 				headVel.reset();
+				if (hmdTracker.slamFallback && drift.valid)
+					++diag.fallbackFrames;
 				if (!hmdTracker.slamFallback) {
 					if (hmdTracker.native) {
 						pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };

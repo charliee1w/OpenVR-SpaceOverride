@@ -7,8 +7,16 @@
 
 extern FILE *LogFile;
 
+// Opens under %LOCALAPPDATA%\OpenVR-SpaceOverride\logs\ (auto on driver Init).
+// Writes spaceoverride_driver.log (append) and a per-session file.
 void OpenLogFile();
 void CloseLogFile();
+
+// Absolute path of the active session log, or "" if not open.
+const char *GetSessionLogPath();
+
+// Also writes to the per-session file (for jump/event diagnostics).
+void LogSession(const char *fmt, ...);
 
 tm TimeForLog();
 void LogFlush();
@@ -20,6 +28,7 @@ void LogFlush();
 		fprintf(LogFile, "[%02d:%02d:%02d] " fmt "\n", logNow.tm_hour, logNow.tm_min, logNow.tm_sec, __VA_ARGS__); \
 		LogFlush(); \
 	} \
+	LogSession(fmt, ##__VA_ARGS__); \
 } while (0)
 #endif
 
