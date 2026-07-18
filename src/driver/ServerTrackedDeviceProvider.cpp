@@ -590,12 +590,31 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return true;
 
-	// P1-b: capture head tracker world pose from its own hook (before any transforms).
+	// Head-mounted lighthouse tracker while override is active:
+	// 1) Cache raw pose for HMD rebuild (P1-b).
+	// 2) Quash the *published* tracker pose so Standable / VRC / FBT IK ignore it.
+	//    Same technique as OpenVR-SpaceCalibrator continuous-cal "Hide tracker"
+	//    (park ~9001 m above origin). Device still enumerates; apps won't use it as a body joint.
 	if (hmdTracker.enabled
 		&& hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount
 		&& openVRID == hmdTracker.trackerID)
 	{
 		CacheTrackerWorldPose(pose);
+
+		// Cancel world-from-driver so final world pos ≈ (0, 9001, 0) regardless of seated zero.
+		pose.vecPosition[0] = -pose.vecWorldFromDriverTranslation[0];
+		pose.vecPosition[1] = -pose.vecWorldFromDriverTranslation[1] + 9001.0;
+		pose.vecPosition[2] = -pose.vecWorldFromDriverTranslation[2];
+		for (int i = 0; i < 3; i++)
+		{
+			pose.vecVelocity[i] = 0;
+			pose.vecAngularVelocity[i] = 0;
+		}
+		// Still "valid" so SteamVR doesn't thrash connection; position is useless for IK.
+		pose.poseIsValid = true;
+		pose.deviceIsConnected = true;
+		pose.result = vr::TrackingResult_Running_OK;
+		return true;
 	}
 
 	auto& tf = transforms[openVRID];
