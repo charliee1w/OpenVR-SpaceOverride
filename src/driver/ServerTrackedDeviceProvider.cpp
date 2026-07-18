@@ -96,11 +96,16 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	OpenLogFile();
 	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
 	LOG("auto-log session: %s", GetSessionLogPath()[0] ? GetSessionLogPath() : "(cwd fallback)");
-	LOG("auto-log: events=tracker_ok/bad, speed_reject, hmd_jump>0.35m, enable/disable, 60s heartbeat");
+	LOG("auto-log: events=tracker_ok/bad, speed_reject, HMD_JUMP/HOLD, last_good_hold, 60s heartbeat");
+	LOG("gates: isfinite, pre-publish jump, last-good<=150ms, tracker-hook-cache");
 
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
 	diag = SessionDiag{};
+	lastGoodHmd = LastGoodHmd{};
+	cachedTracker = CachedTrackerPose{};
+	displayHzQueried = false;
+	cachedDisplayHz = 90.0;
 
 	drift.rotationFilter.params = { 3.0, 1.3, 0.6 };
 	drift.translationFilter.params = { 3.0, 1.3, 0.6 };
@@ -120,13 +125,17 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
-	LOG("session stats: frames=%llu tracker_ok=%llu tracker_bad=%llu jumps=%llu speed_reject=%llu fallback=%llu",
+	LOG("session stats: frames=%llu ok=%llu bad=%llu jumps=%llu jump_holds=%llu last_good_holds=%llu speed_rej=%llu fallback=%llu nonfinite=%llu play_primed=%d",
 		(unsigned long long)diag.frames,
 		(unsigned long long)diag.trackerOkFrames,
 		(unsigned long long)diag.trackerBadFrames,
 		(unsigned long long)diag.jumpEvents,
+		(unsigned long long)diag.jumpHolds,
+		(unsigned long long)diag.lastGoodHolds,
 		(unsigned long long)diag.speedRejects,
-		(unsigned long long)diag.fallbackFrames);
+		(unsigned long long)diag.fallbackFrames,
+		(unsigned long long)diag.nonFiniteDrops,
+		diag.playPrimed ? 1 : 0);
 	LOG("OpenVR-SpaceOverride unloading");
 	SetDriverShuttingDown(true);
 	server.Stop();
@@ -162,6 +171,8 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	// Disable uses k_unTrackedDeviceIndexInvalid; only validate trackerID when enabling.
 	if (cmd.enabled && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
 		return;
+
+	const bool trackerChanged = hmdTracker.trackerID != cmd.trackerID;
 
 	const double newScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
 	const double newHmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
@@ -231,6 +242,15 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		memset(slamSync, 0, sizeof slamSync);
 		diag.haveLastHmdPos = false;
 		diag.trackerStateKnown = false;
+		diag.playPrimed = false;
+		lastGoodHmd.valid = false;
+		cachedTracker.valid = false;
+	}
+	else if (trackerChanged)
+	{
+		cachedTracker.valid = false;
+		lastGoodHmd.valid = false;
+		diag.haveLastHmdPos = false;
 	}
 }
 
@@ -348,10 +368,235 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + drift.translation.v[2];
 }
 
+bool ServerTrackedDeviceProvider::IsFiniteVec3(const double v[3])
+{
+	return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
+bool ServerTrackedDeviceProvider::IsFiniteQuat(const vr::HmdQuaternion_t& q)
+{
+	return std::isfinite(q.w) && std::isfinite(q.x) && std::isfinite(q.y) && std::isfinite(q.z);
+}
+
+double ServerTrackedDeviceProvider::GetCachedDisplayHz(uint32_t hmdOpenVRID)
+{
+	LARGE_INTEGER now{}, freq{};
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+
+	bool need = !displayHzQueried;
+	if (displayHzQueried)
+	{
+		double elapsed = (now.QuadPart - displayHzLastQuery.QuadPart) / (double)freq.QuadPart;
+		if (elapsed >= 1.0)
+			need = true;
+	}
+
+	if (need && hmdOpenVRID < vr::k_unMaxTrackedDeviceCount)
+	{
+		vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(hmdOpenVRID);
+		double hz = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
+		if (hz >= 1.0)
+			cachedDisplayHz = hz;
+		else if (!displayHzQueried)
+			cachedDisplayHz = 90.0;
+		displayHzLastQuery = now;
+		displayHzQueried = true;
+	}
+
+	return cachedDisplayHz > 1.0 ? cachedDisplayHz : 90.0;
+}
+
+void ServerTrackedDeviceProvider::CacheTrackerWorldPose(const vr::DriverPose_t& pose)
+{
+	if (!pose.poseIsValid || !pose.deviceIsConnected || pose.result != vr::TrackingResult_Running_OK)
+		return;
+
+	vr::HmdQuaternion_t worldRot = quaternionNormalize(
+		pose.qWorldFromDriverRotation * pose.qRotation * pose.qDriverFromHeadRotation);
+	if (!IsFiniteQuat(worldRot))
+		return;
+
+	vr::HmdVector3d_t headLocal = quaternionRotateVector(pose.qRotation, pose.vecDriverFromHeadTranslation);
+	double driverLocal[3] = {
+		pose.vecPosition[0] + headLocal.v[0],
+		pose.vecPosition[1] + headLocal.v[1],
+		pose.vecPosition[2] + headLocal.v[2]
+	};
+	vr::HmdVector3d_t world = quaternionRotateVector(pose.qWorldFromDriverRotation, driverLocal);
+	double pos[3] = {
+		world.v[0] + pose.vecWorldFromDriverTranslation[0],
+		world.v[1] + pose.vecWorldFromDriverTranslation[1],
+		world.v[2] + pose.vecWorldFromDriverTranslation[2]
+	};
+	if (!IsFiniteVec3(pos))
+		return;
+
+	vr::HmdVector3d_t worldVel = quaternionRotateVector(pose.qWorldFromDriverRotation, pose.vecVelocity);
+	vr::HmdVector3d_t worldAng = quaternionRotateVector(
+		quaternionNormalize(pose.qWorldFromDriverRotation * pose.qRotation),
+		pose.vecAngularVelocity);
+
+	cachedTracker.rotation = worldRot;
+	cachedTracker.position[0] = pos[0];
+	cachedTracker.position[1] = pos[1];
+	cachedTracker.position[2] = pos[2];
+	cachedTracker.velocity[0] = worldVel.v[0];
+	cachedTracker.velocity[1] = worldVel.v[1];
+	cachedTracker.velocity[2] = worldVel.v[2];
+	cachedTracker.angularVelocity[0] = worldAng.v[0];
+	cachedTracker.angularVelocity[1] = worldAng.v[1];
+	cachedTracker.angularVelocity[2] = worldAng.v[2];
+	QueryPerformanceCounter(&cachedTracker.timestamp);
+	cachedTracker.valid = true;
+}
+
+bool ServerTrackedDeviceProvider::FetchTrackerSample(
+	vr::HmdQuaternion_t& outRot, double outPos[3],
+	double outVel[3], double outAngVel[3], double& outLinSpeed)
+{
+	LARGE_INTEGER now{}, freq{};
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+
+	// Prefer hook cache if fresh (<=100 ms).
+	if (cachedTracker.valid)
+	{
+		double age = (now.QuadPart - cachedTracker.timestamp.QuadPart) / (double)freq.QuadPart;
+		if (age >= 0.0 && age <= 0.10)
+		{
+			outRot = cachedTracker.rotation;
+			for (int i = 0; i < 3; i++)
+			{
+				outPos[i] = cachedTracker.position[i];
+				outVel[i] = cachedTracker.velocity[i];
+				outAngVel[i] = cachedTracker.angularVelocity[i];
+			}
+			outLinSpeed = sqrt(outVel[0] * outVel[0] + outVel[1] * outVel[1] + outVel[2] * outVel[2]);
+			const double maxAcceptLinSpeed = 8.0;
+			if (outLinSpeed <= maxAcceptLinSpeed && IsFiniteQuat(outRot) && IsFiniteVec3(outPos))
+				return true;
+		}
+	}
+
+	// Fallback: unpredicted GetRaw (compositor uses our velocities for reprojection).
+	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+	vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, poses, vr::k_unMaxTrackedDeviceCount);
+
+	if (hmdTracker.trackerID >= vr::k_unMaxTrackedDeviceCount)
+		return false;
+
+	const auto& tp = poses[hmdTracker.trackerID];
+	outVel[0] = tp.vVelocity.v[0];
+	outVel[1] = tp.vVelocity.v[1];
+	outVel[2] = tp.vVelocity.v[2];
+	outAngVel[0] = tp.vAngularVelocity.v[0];
+	outAngVel[1] = tp.vAngularVelocity.v[1];
+	outAngVel[2] = tp.vAngularVelocity.v[2];
+	outLinSpeed = sqrt(outVel[0] * outVel[0] + outVel[1] * outVel[1] + outVel[2] * outVel[2]);
+
+	const double maxAcceptLinSpeed = 8.0;
+	if (!tp.bPoseIsValid || !tp.bDeviceIsConnected
+		|| tp.eTrackingResult != vr::TrackingResult_Running_OK
+		|| outLinSpeed > maxAcceptLinSpeed)
+	{
+		return false;
+	}
+
+	outRot = HmdQuaternion_FromMatrix(tp.mDeviceToAbsoluteTracking);
+	outPos[0] = tp.mDeviceToAbsoluteTracking.m[0][3];
+	outPos[1] = tp.mDeviceToAbsoluteTracking.m[1][3];
+	outPos[2] = tp.mDeviceToAbsoluteTracking.m[2][3];
+	return IsFiniteQuat(outRot) && IsFiniteVec3(outPos);
+}
+
+void ServerTrackedDeviceProvider::StoreLastGoodHmd(const vr::DriverPose_t& pose)
+{
+	lastGoodHmd.rotation = pose.qRotation;
+	lastGoodHmd.position[0] = pose.vecPosition[0];
+	lastGoodHmd.position[1] = pose.vecPosition[1];
+	lastGoodHmd.position[2] = pose.vecPosition[2];
+	lastGoodHmd.velocity[0] = pose.vecVelocity[0];
+	lastGoodHmd.velocity[1] = pose.vecVelocity[1];
+	lastGoodHmd.velocity[2] = pose.vecVelocity[2];
+	lastGoodHmd.angularVelocity[0] = pose.vecAngularVelocity[0];
+	lastGoodHmd.angularVelocity[1] = pose.vecAngularVelocity[1];
+	lastGoodHmd.angularVelocity[2] = pose.vecAngularVelocity[2];
+	QueryPerformanceCounter(&lastGoodHmd.timestamp);
+	lastGoodHmd.valid = true;
+}
+
+bool ServerTrackedDeviceProvider::ApplyLastGoodHmd(vr::DriverPose_t& pose, double maxAgeSec) const
+{
+	if (!lastGoodHmd.valid)
+		return false;
+
+	LARGE_INTEGER now{}, freq{};
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+	double age = (now.QuadPart - lastGoodHmd.timestamp.QuadPart) / (double)freq.QuadPart;
+	if (age < 0.0 || age > maxAgeSec)
+		return false;
+
+	pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
+	pose.vecWorldFromDriverTranslation[0] = 0;
+	pose.vecWorldFromDriverTranslation[1] = 0;
+	pose.vecWorldFromDriverTranslation[2] = 0;
+	pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
+	pose.vecDriverFromHeadTranslation[0] = 0;
+	pose.vecDriverFromHeadTranslation[1] = 0;
+	pose.vecDriverFromHeadTranslation[2] = 0;
+	pose.qRotation = lastGoodHmd.rotation;
+	pose.vecPosition[0] = lastGoodHmd.position[0];
+	pose.vecPosition[1] = lastGoodHmd.position[1];
+	pose.vecPosition[2] = lastGoodHmd.position[2];
+	for (int i = 0; i < 3; i++)
+	{
+		pose.vecVelocity[i] = lastGoodHmd.velocity[i];
+		pose.vecAngularVelocity[i] = lastGoodHmd.angularVelocity[i];
+	}
+	pose.poseIsValid = true;
+	pose.deviceIsConnected = true;
+	pose.result = vr::TrackingResult_Running_OK;
+	pose.shouldApplyHeadModel = false;
+	pose.poseTimeOffset = 0;
+	return true;
+}
+
+bool ServerTrackedDeviceProvider::ShouldHoldForJump(const double newPos[3], double dtSec) const
+{
+	if (!lastGoodHmd.valid)
+		return false; // nothing to compare — accept first solid frame
+	if (!IsFiniteVec3(newPos))
+		return true;
+
+	const double dx = newPos[0] - lastGoodHmd.position[0];
+	const double dy = newPos[1] - lastGoodHmd.position[1];
+	const double dz = newPos[2] - lastGoodHmd.position[2];
+	const double dist = sqrt(dx * dx + dy * dy + dz * dz);
+
+	// Absolute snap (single frame teleport) or impossible speed.
+	const double jumpThreshM = 0.35;
+	const double maxSpeedMps = 8.0;
+	if (dist > jumpThreshM)
+		return true;
+	if (dtSec > 1e-4 && (dist / dtSec) > maxSpeedMps)
+		return true;
+	return false;
+}
+
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return true;
+
+	// P1-b: capture head tracker world pose from its own hook (before any transforms).
+	if (hmdTracker.enabled
+		&& hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount
+		&& openVRID == hmdTracker.trackerID)
+	{
+		CacheTrackerWorldPose(pose);
+	}
 
 	auto& tf = transforms[openVRID];
 	if (tf.enabled && !hmdTracker.native)
@@ -391,38 +636,31 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				rawPosition[2] = world.v[2] + pose.vecWorldFromDriverTranslation[2];
 			}
 
-			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
+			double displayHz = GetCachedDisplayHz(openVRID);
 
-			double displayHz = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
-			if (displayHz < 1.0)
-				displayHz = 90.0;
+			vr::HmdQuaternion_t trackerQuat = { 1, 0, 0, 0 };
+			double rawTrackerPos[3] = { 0, 0, 0 };
+			double trackerVel[3] = { 0, 0, 0 };
+			double trackerAngVel[3] = { 0, 0, 0 };
+			double linSpeed = 0.0;
+			const bool trackerPoseOk = FetchTrackerSample(trackerQuat, rawTrackerPos, trackerVel, trackerAngVel, linSpeed);
+			const bool speedReject = !trackerPoseOk && linSpeed > 8.0;
 
-			// Unpredicted fetch: predicted GetRaw can teleport on a bad velocity sample.
-			// Compositor reprojection uses the velocities we write on the HMD pose.
-			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.0f, poses, vr::k_unMaxTrackedDeviceCount);
-
-			static const vr::TrackedDevicePose_t invalidTrackerPose{};
-			const auto& tp = (hmdTracker.trackerID < vr::k_unMaxTrackedDeviceCount)
-				? poses[hmdTracker.trackerID]
-				: invalidTrackerPose;
-
-			double trackerVel[3] = { tp.vVelocity.v[0], tp.vVelocity.v[1], tp.vVelocity.v[2] };
-			double trackerAngVel[3] = { tp.vAngularVelocity.v[0], tp.vAngularVelocity.v[1], tp.vAngularVelocity.v[2] };
-			const double linSpeed = sqrt(
-				trackerVel[0] * trackerVel[0] +
-				trackerVel[1] * trackerVel[1] +
-				trackerVel[2] * trackerVel[2]);
-
-			// bPoseIsValid alone is not enough; reject impossible kinematics (optical glitches).
-			const double maxAcceptLinSpeed = 8.0;
-			const bool speedReject = tp.bPoseIsValid && tp.bDeviceIsConnected
-				&& tp.eTrackingResult == vr::TrackingResult_Running_OK
-				&& linSpeed > maxAcceptLinSpeed;
-			const bool trackerPoseOk = tp.bPoseIsValid
-				&& tp.bDeviceIsConnected
-				&& tp.eTrackingResult == vr::TrackingResult_Running_OK
-				&& linSpeed <= maxAcceptLinSpeed;
+			// P2-b: first solid OK starts "play" counters (ignore pre-cal BAD noise).
+			if (trackerPoseOk && !diag.playPrimed)
+			{
+				diag.playPrimed = true;
+				diag.frames = 0;
+				diag.trackerOkFrames = 0;
+				diag.trackerBadFrames = 0;
+				diag.jumpEvents = 0;
+				diag.jumpHolds = 0;
+				diag.lastGoodHolds = 0;
+				diag.speedRejects = 0;
+				diag.fallbackFrames = 0;
+				diag.nonFiniteDrops = 0;
+				LOG("play primed (first solid tracker OK) — diag counters reset");
+			}
 
 			++diag.frames;
 			if (trackerPoseOk)
@@ -432,12 +670,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			if (speedReject)
 				++diag.speedRejects;
 
-			// Rate-limited state transitions (auto-log, no user action).
+			// Rate-limited state transitions.
 			{
 				LARGE_INTEGER now{}, freq{};
 				QueryPerformanceCounter(&now);
 				QueryPerformanceFrequency(&freq);
-				const double nowSec = now.QuadPart / (double)freq.QuadPart;
 
 				if (!diag.trackerStateKnown || diag.lastTrackerOk != trackerPoseOk)
 				{
@@ -450,13 +687,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					}
 					if (allowLog)
 					{
-						LOG("tracker %s valid=%d connected=%d result=%d speed=%.2f reject_speed=%d",
+						LOG("tracker %s speed=%.2f reject_speed=%d cache=%d",
 							trackerPoseOk ? "OK" : "BAD",
-							tp.bPoseIsValid ? 1 : 0,
-							tp.bDeviceIsConnected ? 1 : 0,
-							(int)tp.eTrackingResult,
 							linSpeed,
-							speedReject ? 1 : 0);
+							speedReject ? 1 : 0,
+							cachedTracker.valid ? 1 : 0);
 						diag.lastBadLog = now;
 					}
 					diag.lastTrackerOk = trackerPoseOk;
@@ -468,30 +703,24 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				double hb = (now.QuadPart - diag.lastHeartbeat.QuadPart) / (double)freq.QuadPart;
 				if (hb >= 60.0)
 				{
-					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu speed_rej=%llu fallback=%llu enabled=%d",
+					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu holds=%llu lg_holds=%llu speed_rej=%llu fallback=%llu nonfinite=%llu enabled=%d",
 						(unsigned long long)diag.frames,
 						(unsigned long long)diag.trackerOkFrames,
 						(unsigned long long)diag.trackerBadFrames,
 						(unsigned long long)diag.jumpEvents,
+						(unsigned long long)diag.jumpHolds,
+						(unsigned long long)diag.lastGoodHolds,
 						(unsigned long long)diag.speedRejects,
 						(unsigned long long)diag.fallbackFrames,
+						(unsigned long long)diag.nonFiniteDrops,
 						hmdTracker.enabled ? 1 : 0);
 					diag.lastHeartbeat = now;
 				}
-				(void)nowSec;
 			}
 
 			if (trackerPoseOk)
 			{
-				vr::HmdQuaternion_t trackerQuat = HmdQuaternion_FromMatrix(tp.mDeviceToAbsoluteTracking);
-
 				vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
-
-				double rawTrackerPos[3] = {
-					tp.mDeviceToAbsoluteTracking.m[0][3],
-					tp.mDeviceToAbsoluteTracking.m[1][3],
-					tp.mDeviceToAbsoluteTracking.m[2][3]
-				};
 
 				// Local prediction from velocity (honors predictionTime without GetRaw predict).
 				float predFrames = hmdTracker.predictionTime;
@@ -593,46 +822,68 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				pose.shouldApplyHeadModel = false;
 				pose.poseTimeOffset = 0;
 
-				// Detect large HMD world jumps (meters) after override write.
+				// P0-b: non-finite → hold last good or drop.
+				const double candPos[3] = { pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2] };
+				if (!IsFiniteQuat(pose.qRotation) || !IsFiniteVec3(candPos))
 				{
-					const double px = pose.vecPosition[0];
-					const double py = pose.vecPosition[1];
-					const double pz = pose.vecPosition[2];
-					if (diag.haveLastHmdPos)
+					++diag.nonFiniteDrops;
+					if (ApplyLastGoodHmd(pose, 0.15))
 					{
-						const double dx = px - diag.lastHmdPos[0];
-						const double dy = py - diag.lastHmdPos[1];
-						const double dz = pz - diag.lastHmdPos[2];
-						const double dist = sqrt(dx * dx + dy * dy + dz * dz);
-						const double jumpThresh = 0.35; // 35 cm in one pose update is not human
-						if (dist > jumpThresh)
-						{
-							++diag.jumpEvents;
-							LARGE_INTEGER now{}, freq{};
-							QueryPerformanceCounter(&now);
-							QueryPerformanceFrequency(&freq);
-							bool allow = true;
-							if (diag.lastJumpLog.QuadPart != 0)
-							{
-								double since = (now.QuadPart - diag.lastJumpLog.QuadPart) / (double)freq.QuadPart;
-								if (since < 0.5)
-									allow = false;
-							}
-							if (allow)
-							{
-								LOG("HMD_JUMP dist=%.3fm pos=(%.2f,%.2f,%.2f) prev=(%.2f,%.2f,%.2f) speed=%.2f pred=%.2f",
-									dist, px, py, pz,
-									diag.lastHmdPos[0], diag.lastHmdPos[1], diag.lastHmdPos[2],
-									linSpeed, hmdTracker.predictionTime);
-								diag.lastJumpLog = now;
-							}
-						}
+						++diag.lastGoodHolds;
+						return true;
 					}
-					diag.lastHmdPos[0] = px;
-					diag.lastHmdPos[1] = py;
-					diag.lastHmdPos[2] = pz;
-					diag.haveLastHmdPos = true;
+					pose.poseIsValid = false;
+					pose.result = vr::TrackingResult_Running_OutOfRange;
+					return true;
 				}
+
+				// P0-a: pre-publish jump gate — do not emit teleports.
+				double dtPos = 1.0 / displayHz;
+				if (diag.haveLastHmdPos && diag.lastHmdPosTime.QuadPart != 0)
+				{
+					LARGE_INTEGER now{}, freq{};
+					QueryPerformanceCounter(&now);
+					QueryPerformanceFrequency(&freq);
+					double dt = (now.QuadPart - diag.lastHmdPosTime.QuadPart) / (double)freq.QuadPart;
+					if (dt > 1e-4 && dt < 0.1)
+						dtPos = dt;
+				}
+
+				if (ShouldHoldForJump(candPos, dtPos))
+				{
+					const double dx = candPos[0] - lastGoodHmd.position[0];
+					const double dy = candPos[1] - lastGoodHmd.position[1];
+					const double dz = candPos[2] - lastGoodHmd.position[2];
+					const double dist = lastGoodHmd.valid ? sqrt(dx * dx + dy * dy + dz * dz) : 0.0;
+					++diag.jumpEvents;
+					++diag.jumpHolds;
+					LARGE_INTEGER now{}, freq{};
+					QueryPerformanceCounter(&now);
+					QueryPerformanceFrequency(&freq);
+					bool allow = true;
+					if (diag.lastJumpLog.QuadPart != 0)
+					{
+						double since = (now.QuadPart - diag.lastJumpLog.QuadPart) / (double)freq.QuadPart;
+						if (since < 0.5)
+							allow = false;
+					}
+					if (allow)
+					{
+						LOG("HMD_JUMP_HOLD dist=%.3fm dt=%.4f speed=%.2f (held last good)",
+							dist, dtPos, linSpeed);
+						diag.lastJumpLog = now;
+					}
+					if (ApplyLastGoodHmd(pose, 0.25))
+						return true;
+					// No last good yet — fall through and accept first frame.
+				}
+
+				StoreLastGoodHmd(pose);
+				diag.lastHmdPos[0] = pose.vecPosition[0];
+				diag.lastHmdPos[1] = pose.vecPosition[1];
+				diag.lastHmdPos[2] = pose.vecPosition[2];
+				QueryPerformanceCounter(&diag.lastHmdPosTime);
+				diag.haveLastHmdPos = true;
 
 				if (rawValid)
 				{
@@ -641,8 +892,6 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						trackerAngVel[1] * trackerAngVel[1] +
 						trackerAngVel[2] * trackerAngVel[2]);
 
-					// Soft gate: full weight below soft caps, zero past hard caps, blend between.
-					// Avoids hard lock→jump when turning quickly through the old 2.75/3.5 cliffs.
 					const double softLin = 1.5, hardLin = 3.5;
 					const double softAng = 2.0, hardAng = 5.0;
 					double weight = SoftGateWeight(linSpeed, softLin, hardLin)
@@ -655,8 +904,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				}
 			}
 			else {
-				// Brief LOS/glitch: keep Kalman so reacquire does not snap from a reset filter.
+				// P1-a: brief LOS — hold last good up to 150 ms before slam fallback.
 				headVel.reset();
+				if (ApplyLastGoodHmd(pose, 0.15))
+				{
+					++diag.lastGoodHolds;
+					return true;
+				}
+
 				if (hmdTracker.slamFallback && drift.valid)
 					++diag.fallbackFrames;
 				if (!hmdTracker.slamFallback) {

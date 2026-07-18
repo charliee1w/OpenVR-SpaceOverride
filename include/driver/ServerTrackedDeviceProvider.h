@@ -56,6 +56,22 @@ private:
 		return hmdTracker.native ? k : k * hmdTracker.calibrationScale;
 	}
 
+	// P1-b: cache head tracker from its own pose hook (avoids GetRaw every HMD frame).
+	void CacheTrackerWorldPose(const vr::DriverPose_t &pose);
+	// Prefer fresh hook cache; fall back to unpredicted GetRaw.
+	bool FetchTrackerSample(vr::HmdQuaternion_t &outRot, double outPos[3],
+		double outVel[3], double outAngVel[3], double &outLinSpeed);
+	// P2-a: display Hz queried at most ~1 Hz.
+	double GetCachedDisplayHz(uint32_t hmdOpenVRID);
+	// P0-b: finite pos/quat.
+	static bool IsFiniteVec3(const double v[3]);
+	static bool IsFiniteQuat(const vr::HmdQuaternion_t &q);
+	// P0-a / P1-a: last published good HMD override pose.
+	void StoreLastGoodHmd(const vr::DriverPose_t &pose);
+	bool ApplyLastGoodHmd(vr::DriverPose_t &pose, double maxAgeSec) const;
+	// P0-a: if candidate jumps too far vs last good, hold last good instead.
+	bool ShouldHoldForJump(const double newPos[3], double dtSec) const;
+
 	IPCServer server;
 
 	struct DeviceTransform
@@ -125,19 +141,51 @@ private:
 		void reset() { valid = false; filter.reset(); }
 	} headVel;
 
+	// P1-b: last good tracker sample from the tracker device's pose hook.
+	struct CachedTrackerPose
+	{
+		bool valid = false;
+		LARGE_INTEGER timestamp = {};
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		double position[3] = { 0, 0, 0 };
+		double velocity[3] = { 0, 0, 0 };
+		double angularVelocity[3] = { 0, 0, 0 };
+	} cachedTracker;
+
+	// P0/P1: last published override HMD pose (hold / jump gate).
+	struct LastGoodHmd
+	{
+		bool valid = false;
+		LARGE_INTEGER timestamp = {};
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		double position[3] = { 0, 0, 0 };
+		double velocity[3] = { 0, 0, 0 };
+		double angularVelocity[3] = { 0, 0, 0 };
+	} lastGoodHmd;
+
+	// P2-a
+	double cachedDisplayHz = 90.0;
+	LARGE_INTEGER displayHzLastQuery = {};
+	bool displayHzQueried = false;
+
 	// Auto session diagnostics (starts with driver load — no user action).
 	struct SessionDiag
 	{
 		bool haveLastHmdPos = false;
 		double lastHmdPos[3] = { 0, 0, 0 };
+		LARGE_INTEGER lastHmdPosTime = {};
 		bool lastTrackerOk = false;
 		bool trackerStateKnown = false;
+		bool playPrimed = false; // P2-b: counters reset after first solid OK
 		uint64_t frames = 0;
 		uint64_t trackerOkFrames = 0;
 		uint64_t trackerBadFrames = 0;
 		uint64_t jumpEvents = 0;
+		uint64_t jumpHolds = 0;
+		uint64_t lastGoodHolds = 0;
 		uint64_t speedRejects = 0;
 		uint64_t fallbackFrames = 0;
+		uint64_t nonFiniteDrops = 0;
 		LARGE_INTEGER lastHeartbeat = {};
 		LARGE_INTEGER lastJumpLog = {};
 		LARGE_INTEGER lastBadLog = {};
