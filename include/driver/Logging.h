@@ -18,6 +18,13 @@ const char *GetSessionLogPath();
 // Also writes to the per-session file (for jump/event diagnostics).
 void LogSession(const char *fmt, ...);
 
+// Per-frame fusion diagnostic CSV (fusion_diag_<ts>.csv in the logs dir).
+// Opened only when fusionMode && fusionDiag; header written on open.
+void OpenDiagCsv();
+void CloseDiagCsv();
+bool DiagCsvOpen();
+void LogDiagCsv(const char *fmt, ...);
+
 tm TimeForLog();
 void LogFlush();
 
