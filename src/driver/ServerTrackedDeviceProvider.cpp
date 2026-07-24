@@ -870,10 +870,14 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 		QueryPerformanceCounter(&now);
 		QueryPerformanceFrequency(&freq);
 		double dt = (now.QuadPart - diag.lastHmdPosTime.QuadPart) / (double)freq.QuadPart;
-		// V0-c: real elapsed time since the last accepted frame (capped), so
-		// recovery after a hold/BAD gap doesn't divide real motion by one frame.
+		// V0-c: real elapsed time since the last accepted frame, so recovery after a
+		// hold/BAD gap doesn't divide real motion by one frame. Floored at half a
+		// display frame: back-to-back pose callbacks otherwise divide a harmless
+		// millimetre-scale step by a sub-millisecond gap and manufacture an
+		// impossible speed (observed: 1.5cm over 1.2ms read as 12.5 m/s).
+		const double dtFloor = 0.5 / displayHz;
 		if (dt > 1e-4)
-			dtPos = dt < 0.3 ? dt : 0.3;
+			dtPos = dt < 0.3 ? (dt > dtFloor ? dt : dtFloor) : 0.3;
 	}
 
 	// V1: bounded reconvergence — a far candidate is approached at
