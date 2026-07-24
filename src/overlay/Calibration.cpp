@@ -12,12 +12,54 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
+#include <fstream>
+#include <iomanip>
+
+#include <windows.h>
 
 #include <Dense>
 
 
 static IPCClient Driver;
 CalibrationContext CalCtx;
+
+// Calibration results previously existed only in the overlay's message list, so a
+// past calibration's quality could not be reviewed afterwards - which is exactly
+// what you need when repeat calibrations disagree. Append a one-line record per
+// completed calibration next to the driver's session logs.
+static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM)
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return;
+
+	std::string dir = std::string(localAppData) + "\\OpenVR-SpaceOverride\\logs";
+	CreateDirectoryA((std::string(localAppData) + "\\OpenVR-SpaceOverride").c_str(), nullptr);
+	CreateDirectoryA(dir.c_str(), nullptr);
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+
+	std::ofstream out(dir + "\\calibration.log", std::ios::app);
+	if (!out)
+		return;
+
+	out << std::fixed << std::setprecision(5)
+		<< st.wYear << "-" << std::setw(2) << std::setfill('0') << st.wMonth << "-"
+		<< std::setw(2) << std::setfill('0') << st.wDay << " "
+		<< std::setw(2) << std::setfill('0') << st.wHour << ":"
+		<< std::setw(2) << std::setfill('0') << st.wMinute << ":"
+		<< std::setw(2) << std::setfill('0') << st.wSecond << std::setfill(' ')
+		<< "  rms_mm=" << std::setprecision(1) << rmsErrorMm
+		<< "  spread_m=" << std::setprecision(3) << spreadM
+		<< "  hmdScale=" << std::setprecision(5) << ctx.hmdScale
+		<< "  targetModelScale=" << ctx.targetModelScale
+		<< "  speed=" << (int)ctx.calibrationSpeed
+		<< "  tracker=" << ctx.trackerSerial
+		<< "\n";
+}
 
 // Last commands successfully sent to the driver. Scan runs every ~1s; skip no-ops.
 struct AppliedDeviceTransform
@@ -331,6 +373,10 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 static const double ScaleSpreadThreshold = 0.1;
 static const double MinCalibratedScale = 0.9;
 static const double MaxCalibratedScale = 1.1;
+// Accept a fitted headset scale only when the data determines it this tightly.
+// A scale wrong by more than this costs less than a noisy estimate that changes
+// every calibration, so an undetermined fit falls back to exactly 1.
+static const double MaxScaleStdErr = 0.005;
 
 Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
 {
@@ -383,6 +429,10 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 	return transcm;
 }
 
+// Positional spread of the last scale estimate, recorded for the calibration log:
+// it is the quantity that determines whether scale was observable at all.
+static double g_lastScaleSpread = 0.0;
+
 static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
 {
 	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
@@ -394,6 +444,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	for (auto &sample : samples)
 		spread += (rotation * sample.target.trans - centroid).squaredNorm();
 	spread = std::sqrt(spread / (double)samples.size());
+	g_lastScaleSpread = spread;
 
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
@@ -417,8 +468,45 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 		constants.segment<3>(i * 3) = samples[i].ref.trans;
 	}
 
-	Eigen::VectorXd result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+	Eigen::BDCSVD<Eigen::MatrixXd> svd = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
+	Eigen::VectorXd result = svd.solve(constants);
 	double fittedScale = result(0);
+
+	// Observability check. The scale multiplies the tracker position while params 1-3
+	// are a free translation, so a cluster of samples in a small volume makes the two
+	// nearly degenerate - only the *spread* carries scale information. Head rotation
+	// alone moves a head-mounted tracker in a ~10-20cm arc, which clears the spread
+	// guard above while leaving the fit badly conditioned: with ~4mm sample noise the
+	// scale is then uncertain by a few percent, and repeat calibrations disagree by
+	// more than the quantity being measured. Estimate the standard error from the SVD
+	// and refuse the fit when it is not actually determined by the data.
+	const Eigen::VectorXd sv = svd.singularValues();
+	const int nObs = (int)(samples.size() * 3);
+	const int nParams = 7;
+	double scaleStdErr = std::numeric_limits<double>::infinity();
+	if (nObs > nParams && sv.size() > 0 && sv(0) > 0.0)
+	{
+		const double resid2 = (coefficients * result - constants).squaredNorm();
+		const double sigma2 = resid2 / (double)(nObs - nParams);
+		// (A^T A)^-1 [0,0] via the thin SVD: sum_j V(0,j)^2 / s_j^2
+		double cov00 = 0.0;
+		const double tol = sv(0) * 1e-9;
+		for (int j = 0; j < sv.size(); j++)
+			if (sv(j) > tol)
+				cov00 += (svd.matrixV()(0, j) * svd.matrixV()(0, j)) / (sv(j) * sv(j));
+		if (cov00 > 0.0 && sigma2 >= 0.0)
+			scaleStdErr = std::sqrt(sigma2 * cov00);
+	}
+
+	if (!(scaleStdErr <= MaxScaleStdErr))
+	{
+		snprintf(buf, sizeof buf,
+			"Headset scale is not determined by this calibration (fit %.5f +/- %.2f%%, positional spread %.2f m) - assuming 1.\n"
+			"To measure scale, walk around and cover more of your play space while calibrating; head rotation alone is not enough.\n",
+			fittedScale, scaleStdErr * 100.0, spread);
+		CalCtx.Log(buf);
+		return 1.0;
+	}
 
 	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
@@ -427,8 +515,8 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 		return 1.0;
 	}
 
-	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%), implied absolute headset scale: %.5f\n",
-		fittedScale, (fittedScale - 1.0) * 100.0, fittedScale / targetModelScale);
+	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%, +/- %.2f%%), implied absolute headset scale: %.5f\n",
+		fittedScale, (fittedScale - 1.0) * 100.0, scaleStdErr * 100.0, fittedScale / targetModelScale);
 	CalCtx.Log(buf);
 	return fittedScale;
 }
@@ -1106,6 +1194,7 @@ void CalibrationTick(double time)
 
 		ctx.validProfile = true;
 		SaveProfile(ctx);
+		LogCalibrationResult(ctx, rmsError * 1000.0, g_lastScaleSpread);
 		CalCtx.Log("Finished calibration, profile saved\n");
 
 		if (CalCtx.notificationId != 0) {
