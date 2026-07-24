@@ -239,7 +239,7 @@ void UserInterface::Render(bool runningInOverlay)
 			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
 			ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
 			ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-			ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " - by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
+			ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " fusion fork - by helpgore (Discord: helpgore) | upstream by Nyabsi | Space Calibrator by tach/pushrax");
 			if (runningInOverlay)
 			{
 				ImGui::Text("close VR overlay to use mouse");

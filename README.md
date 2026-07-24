@@ -1,13 +1,14 @@
 # OpenVR-SpaceOverride — fusion fork
 
-**This is a modified version of [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride) by [Nyabsi](https://github.com/Nyabsi)**, which itself builds on [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) by [pushrax](https://github.com/pushrax). It is maintained separately at [charliee1w/OpenVR-SpaceOverride](https://github.com/charliee1w/OpenVR-SpaceOverride). See [What this fork changes](#what-this-fork-changes).
+**This is a modified version of [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride) by [Nyabsi](https://github.com/Nyabsi)**, which itself builds on [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator) by [pushrax](https://github.com/pushrax). This fork is maintained by **helpgore** at [charliee1w/OpenVR-SpaceOverride](https://github.com/charliee1w/OpenVR-SpaceOverride). See [What this fork changes](#what-this-fork-changes).
 
 The problem is unchanged from upstream: a SLAM-tracked headset and your lighthouse-tracked devices live in two coordinate spaces that slowly slide apart, so a one-time playspace calibration decays and your head stops agreeing with your hands and feet. With a rigid tracker mounted to the headset, calibration solves the fixed transform between that tracker and your head, which gives the driver a continuously observable relationship between the two systems instead of a single stale offset.
 
 What the driver *does* with that relationship is where this fork diverges: it ships two opposite modes.
 
 > [!IMPORTANT]
-> **Do not send reports about this build to upstream.** This tree contains substantial code upstream's author did not write, and behavior described here may not exist upstream at all. Please don't use the contact address in upstream's README for it. If you can reproduce a problem on an unmodified upstream build, that one belongs upstream — everything else belongs to this fork.
+> **Questions or problems with this build go to helpgore — Discord `helpgore`.**
+> Please don't send them upstream: this tree contains substantial code upstream's author did not write, and behavior described here may not exist upstream at all, so the contact address in upstream's README is the wrong place for it. If you can reproduce a problem on an unmodified upstream build, that one belongs upstream — everything else belongs here.
 
 ## Requirements
 
@@ -194,12 +195,13 @@ Specific thresholds, filter constants and gate limits are intentionally not rest
 
 Windows, MSVC, CMake with the presets in `CMakePresets.json`. Clone with submodules; the dependencies under `3rdparty/` are required. The build produces the overlay executable and `driver_spaceoverride.dll`, and the driver folder layout SteamVR expects is under `dev-resources/`.
 
-## Acknowledgements
+## Credits
 
-- [pushrax](https://github.com/pushrax) — [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator), substantial parts of which this lineage uses and descends from.
+- **helpgore** — this fork: fusion mode and its estimator, the pose gates, diagnostics and the rest of [what this fork changes](#what-this-fork-changes). Contact on Discord as `helpgore` for anything about this build.
 - [Nyabsi](https://github.com/Nyabsi) — [OpenVR-SpaceOverride](https://github.com/Nyabsi/OpenVR-SpaceOverride), the upstream project this forks. The override pose path, the calibration solver, the overlay and the driver architecture are his work, and this fork inherits all of it.
+- [pushrax](https://github.com/pushrax) — [OpenVR Space Calibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator), substantial parts of which this lineage uses and descends from.
 
-Everything listed in [What this fork changes](#what-this-fork-changes) is this fork's; everything else is theirs.
+Everything listed in [What this fork changes](#what-this-fork-changes) is this fork's; everything else belongs to upstream.
 
 ## License
 
