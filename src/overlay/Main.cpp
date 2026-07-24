@@ -340,12 +340,14 @@ int main(int argc, char** argv)
             const uint32_t timeout_ms = static_cast<uint32_t>((target_time_ns - frame_duration_ns) / 1'000'000);
             vr::VROverlay()->WaitFrameSync(timeout_ms);
 
-            const uint64_t remaining_ns = target_time_ns - (now - g_last_frame_time);
-            if (remaining_ns > 0)
-                SDL_DelayPrecise(remaining_ns);
+            // V3-d: re-read the clock after WaitFrameSync — the old code slept the full
+            // remainder again on top of the sync wait.
+            const uint64_t elapsed_ns = SDL_GetTicksNS() - g_last_frame_time;
+            if (elapsed_ns < target_time_ns)
+                SDL_DelayPrecise(target_time_ns - elapsed_ns);
         }
 
-        g_last_frame_time = now;
+        g_last_frame_time = SDL_GetTicksNS();
     }
 
     // SaveProfile itself no-ops when !validProfile (avoids wiping a good registry cal).

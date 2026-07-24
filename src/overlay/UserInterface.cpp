@@ -358,6 +358,56 @@ void UserInterface::Render(bool runningInOverlay)
 
 		if (ImGui::BeginTabItem("Settings"))
 		{
+			// Live driver settings (steamvr.vrsettings). The driver polls these ~1 Hz,
+			// so they apply without re-calibrating or restarting SteamVR.
+			{
+				static bool fusionMode = false, fusionDiag = false;
+				static double lastRead = -1.0;
+				const double nowTime = ImGui::GetTime();
+				if (lastRead < 0.0 || (nowTime - lastRead) > 0.5)
+				{
+					vr::EVRSettingsError err = vr::VRSettingsError_None;
+					bool v = vr::VRSettings()->GetBool("driver_spaceoverride", "fusionMode", &err);
+					if (err == vr::VRSettingsError_None) fusionMode = v;
+					err = vr::VRSettingsError_None;
+					v = vr::VRSettings()->GetBool("driver_spaceoverride", "fusionDiag", &err);
+					if (err == vr::VRSettingsError_None) fusionDiag = v;
+					lastRead = nowTime;
+				}
+
+				ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f),
+					"NOTE: Tracking mode applies within ~1 second. No re-calibration needed.");
+				ImGui::Spacing();
+
+				if (ImGui::Checkbox("Fusion mode", &fusionMode))
+				{
+					vr::EVRSettingsError err = vr::VRSettingsError_None;
+					vr::VRSettings()->SetBool("driver_spaceoverride", "fusionMode", fusionMode, &err);
+				}
+				ImGui::SetItemTooltip(
+					"ON (Fusion): your view comes from the headset's own tracking, and the head\n"
+					"tracker quietly keeps it anchored to your lighthouse space. Smoothest view;\n"
+					"losing sight of the tracker is harmless.\n\n"
+					"OFF (Override): your view is built directly from the head tracker. Locks head\n"
+					"and body to the exact same space, but you feel the tracker's jitter and\n"
+					"line-of-sight losses.\n\n"
+					"Switching is safe mid-session - the change is eased in, never snapped.");
+
+				if (ImGui::Checkbox("Diagnostic log (CSV)", &fusionDiag))
+				{
+					vr::EVRSettingsError err = vr::VRSettingsError_None;
+					vr::VRSettings()->SetBool("driver_spaceoverride", "fusionDiag", fusionDiag, &err);
+				}
+				ImGui::SetItemTooltip(
+					"Writes a per-frame tracking-quality log to\n"
+					"%LOCALAPPDATA%\\OpenVR-SpaceOverride\\logs\\fusion_diag_*.csv\n"
+					"Only needed when investigating tracking quality. Fusion mode only.");
+
+				ImGui::Spacing();
+				ImGui::Separator();
+				ImGui::Spacing();
+			}
+
 			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
 			ImGui::Spacing();
 			ImGui::Text("Tip: hover over the settings to see additional information.");

@@ -318,6 +318,22 @@ void LoadProfile(CalibrationContext &ctx)
 	}
 }
 
+// V3-b: mirror the profile to a plain file so a lost registry key is recoverable.
+static void WriteBackupFile(const std::string &str)
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return;
+
+	std::string dir = std::string(localAppData) + "\\OpenVR-SpaceOverride";
+	CreateDirectoryA(dir.c_str(), nullptr);
+
+	std::ofstream out(dir + "\\profile-backup.json", std::ios::trunc);
+	if (out)
+		out << str;
+}
+
 void SaveProfile(CalibrationContext &ctx)
 {
 	// Never overwrite a good registry profile with empty/invalid state (e.g. clean exit mid-setup).
@@ -332,4 +348,5 @@ void SaveProfile(CalibrationContext &ctx)
 	std::stringstream io;
 	WriteProfile(ctx, io);
 	WriteRegistryKey(io.str());
+	WriteBackupFile(io.str());
 }

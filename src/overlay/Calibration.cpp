@@ -814,6 +814,11 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
+// V3-e: sample quality gate state (HMD angular speed between sampling ticks).
+static Eigen::Matrix3d g_prevSampleHmdRot;
+static double g_prevSampleTime = 0;
+static bool g_havePrevSample = false;
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 {
 	ctx.targetID = targetID;
@@ -830,6 +835,7 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 
 	ctx.state = CalibrationState::Sampling;
 	ctx.wantedUpdateInterval = 0.0;
+	g_havePrevSample = false;
 	ctx.Log("Starting calibration...\n");
 }
 
@@ -844,6 +850,7 @@ void StartCalibration()
 	Detection.Clear();
 	collectedSamples.clear();
 	coplanarRetries = 0;
+	g_havePrevSample = false;
 }
 
 static void AbortAndRestoreProfile(CalibrationContext &ctx)
@@ -1009,6 +1016,22 @@ void CalibrationTick(double time)
 		Detection.Clear();
 		BeginSamplingPhase(ctx, targetID);
 		return;
+	}
+
+	// V3-e: drop samples taken during fast head rotation — wireless HMD pose latency vs
+	// lighthouse tracker latency skews paired samples and inflates the residual error.
+	if (ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
+	{
+		const double kMaxSampleAngSpeed = 1.5; // rad/s
+		Eigen::Matrix3d hmdRot = Pose(ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking).rot;
+		double dt = time - g_prevSampleTime;
+		bool tooFast = g_havePrevSample && dt > 1e-4
+			&& AngularSpeedBetween(hmdRot, g_prevSampleHmdRot, dt) > kMaxSampleAngSpeed;
+		g_prevSampleHmdRot = hmdRot;
+		g_prevSampleTime = time;
+		g_havePrevSample = true;
+		if (tooFast)
+			return;
 	}
 
 	auto sample = CollectSample(ctx);
