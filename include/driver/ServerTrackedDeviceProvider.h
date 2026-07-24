@@ -8,6 +8,9 @@
 
 #include <openvr_driver.h>
 
+#include <mutex>
+#include <shared_mutex>
+
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
 public:
@@ -22,8 +25,9 @@ public:
 	/** Returns the version of the ITrackedDeviceServerDriver interface used by this driver */
 	virtual const char * const *GetInterfaceVersions() { return vr::k_InterfaceVersions; }
 
-	/** Allows the driver do to some work in the main loop of the server. */
-	virtual void RunFrame() { }
+	/** Allows the driver do to some work in the main loop of the server.
+	* Polls live driver settings (fusionMode / fusionDiag) that the overlay writes. */
+	virtual void RunFrame() override;
 
 	/** Returns true if the driver wants to block Standby mode. */
 	virtual bool ShouldBlockStandbyMode() { return false; }
@@ -152,6 +156,68 @@ private:
 		double angularVelocity[3] = { 0, 0, 0 };
 	} cachedTracker;
 
+	// V2-b: IPC setters exclusive; pose threads hold shared for the whole callback.
+	std::shared_mutex configMutex;
+	// V2-a: tracker cache crosses pose threads (tracker writes, HMD reads) while both
+	// hold configMutex shared — needs its own lock. Order: configMutex → trackerCacheMutex.
+	std::mutex trackerCacheMutex;
+
+	// V1: currently slewing toward a far candidate (bounded catch-up, HMD thread only).
+	bool reconverging = false;
+
+	// FUSION mode (steamvr.vrsettings driver_spaceoverride/fusionMode, read once at Init):
+	// SLAM is the pose source, the tracker only observes the SLAM→lighthouse correction.
+	// LOS loss becomes a non-event; SLAM relocation steps are cancelled same-frame.
+	bool fusionMode = false;
+
+	// Per-frame fusion diagnostic CSV (driver_spaceoverride/fusionDiag). Answers
+	// "is disp low during motion real alignment or the filter coasting?" by logging
+	// speed alongside the Kalman gain Kt and the innovation disp.
+	bool fusionDiag = false;
+	LARGE_INTEGER diagStart = {};
+	LARGE_INTEGER diagLastWrite = {};
+	LARGE_INTEGER settingsLastPoll = {};
+
+	// Fusion step-attribution state (HMD thread only).
+	struct FusionState
+	{
+		bool havePrev = false;
+		LARGE_INTEGER lastFrame = {};
+		LARGE_INTEGER lastCancel = {};
+		double prevRawPos[3] = { 0, 0, 0 };
+		double prevObsPos[3] = { 0, 0, 0 };
+	} fusion;
+
+	// FUSION estimator: error-state Kalman filter on the yaw+translation correction
+	// with online tracker-vs-SLAM time-offset (tau) calibration. Replaces the
+	// One-Euro drift filter in fusion mode; writes its state into `drift` so
+	// ApplyDrift / slamSync / fallback paths stay unchanged. HMD thread only.
+	struct FusionEkf
+	{
+		bool valid = false;
+		vr::HmdQuaternion_t yawCorr = { 1, 0, 0, 0 };
+		double trans[3] = { 0, 0, 0 };
+		double Ptheta = 1.0;   // yaw error variance, rad^2 (large = unconverged)
+		double Pt = 1.0;       // translation error variance, m^2, isotropic
+		int outlierRun = 0;    // consecutive gated samples -> covariance reset
+		LARGE_INTEGER lastUpdate = {};
+	} ekf;
+
+	// One EKF measurement step. Returns false when the sample was rejected by the
+	// innovation gate (tracker glitch / unattributed step). Tracker-vs-SLAM latency
+	// skew is absorbed into the motion-inflated measurement noise, not corrected via
+	// an online time-offset — validated 2026-07-23: at the ~2 mm tracker noise floor
+	// a time-offset estimator has no observable signal (see VFINAL.md).
+	bool FusionEkfUpdate(const vr::HmdQuaternion_t &obsRot, const double obsPos[3],
+		const vr::HmdQuaternion_t &rawRot, const double rawPos[3],
+		double linSpeed, double angSpeed);
+
+	// P0-b/V0-c/V1 publish gates shared by override and fusion paths.
+	// Returns false when the pose was replaced by a last-good hold or invalidated
+	// (caller must skip drift bookkeeping for this frame).
+	bool GatePublish(vr::DriverPose_t &pose, double displayHz, double linSpeed);
+
+
 	// P0/P1: last published override HMD pose (hold / jump gate).
 	struct LastGoodHmd
 	{
@@ -186,6 +252,12 @@ private:
 		uint64_t speedRejects = 0;
 		uint64_t fallbackFrames = 0;
 		uint64_t nonFiniteDrops = 0;
+		// Fusion diagnostics: cancelled SLAM relocation steps + per-heartbeat-window
+		// disparity (instantaneous vs filtered correction, cm).
+		uint64_t slamSteps = 0;
+		double dispSumCm = 0;
+		double dispMaxCm = 0;
+		uint64_t dispN = 0;
 		LARGE_INTEGER lastHeartbeat = {};
 		LARGE_INTEGER lastJumpLog = {};
 		LARGE_INTEGER lastBadLog = {};
