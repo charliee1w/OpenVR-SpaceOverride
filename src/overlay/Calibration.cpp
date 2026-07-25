@@ -907,6 +907,28 @@ static Eigen::Matrix3d g_prevSampleHmdRot;
 static double g_prevSampleTime = 0;
 static bool g_havePrevSample = false;
 
+// Live calibration guidance state.
+static double g_lastHintTime = 0;
+static double g_lastFastDropTime = 0;
+
+// RMS spread of the target (head tracker) positions collected so far. Rotation is
+// distance-preserving, so this equals the spread used later for the scale fit, and
+// it is what tells us whether the user has actually translated through space (the
+// only motion that makes headset scale observable) vs merely rotated in place.
+static double TargetSpread(const std::vector<Sample> &samples)
+{
+	if (samples.size() < 2)
+		return 0.0;
+	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+	for (auto &s : samples)
+		centroid += s.target.trans;
+	centroid /= (double)samples.size();
+	double var = 0.0;
+	for (auto &s : samples)
+		var += (s.target.trans - centroid).squaredNorm();
+	return std::sqrt(var / (double)samples.size());
+}
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 {
 	ctx.targetID = targetID;
@@ -924,6 +946,10 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	ctx.state = CalibrationState::Sampling;
 	ctx.wantedUpdateInterval = 0.0;
 	g_havePrevSample = false;
+	g_lastHintTime = 0;
+	g_lastFastDropTime = 0;
+	ctx.sampleHint = "Move your head slowly through different angles";
+	ctx.sampleHintLevel = 1;
 	ctx.Log("Starting calibration...\n");
 }
 
@@ -1119,7 +1145,14 @@ void CalibrationTick(double time)
 		g_prevSampleTime = time;
 		g_havePrevSample = true;
 		if (tooFast)
+		{
+			// This is why the bar can stall with no explanation: samples are being
+			// dropped. Tell the user, and hold the message briefly so it is readable.
+			ctx.sampleHint = "Slow down - moving too fast, samples are being skipped";
+			ctx.sampleHintLevel = 2;
+			g_lastFastDropTime = time;
 			return;
+		}
 	}
 
 	auto sample = CollectSample(ctx);
@@ -1132,6 +1165,36 @@ void CalibrationTick(double time)
 	samples.push_back(sample);
 
 	CalCtx.Progress(samples.size(), CalCtx.SampleCount());
+
+	// Live guidance: after each accepted sample, tell the user what the solver still
+	// needs, so deficient motion is corrected during sampling instead of only being
+	// reported after a full batch (which then discards a quarter and restarts).
+	// Throttled, and it does not override a fresh "slow down" message.
+	if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
+	{
+		g_lastHintTime = time;
+		const size_t target = CalCtx.SampleCount();
+		if (samples.size() < target / 5)
+		{
+			ctx.sampleHint = "Move your head slowly through different angles";
+			ctx.sampleHintLevel = 1;
+		}
+		else if (SecondAxisVariance(samples) < AxisVarianceThreshold * 2.0)
+		{
+			ctx.sampleHint = "Add rotation variety - tilt ear-to-shoulder and look up/down, not just left and right";
+			ctx.sampleHintLevel = 1;
+		}
+		else if (TargetSpread(samples) < 0.20)
+		{
+			ctx.sampleHint = "Step around and crouch - cover more of your play space to lock in scale";
+			ctx.sampleHintLevel = 1;
+		}
+		else
+		{
+			ctx.sampleHint = "Looking good - keep moving smoothly until the bar fills";
+			ctx.sampleHintLevel = 0;
+		}
+	}
 
 	if (samples.size() >= CalCtx.SampleCount())
 	{

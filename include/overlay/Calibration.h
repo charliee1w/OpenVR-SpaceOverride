@@ -56,6 +56,12 @@ struct CalibrationContext
 
 	vr::VRNotificationId notificationId = 0;
 
+	// Live guidance shown during the sampling phase: what motion the solver still
+	// needs. Level 0 = on track (green), 1 = add this motion (yellow), 2 = slow down
+	// because samples are being dropped (orange).
+	std::string sampleHint;
+	int sampleHintLevel = 0;
+
 	enum Speed
 	{
 		FAST = 0,

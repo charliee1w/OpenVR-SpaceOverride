@@ -269,6 +269,19 @@ void UserInterface::Render(bool runningInOverlay)
 				}
 				ImGui::PopStyleColor();
 
+				// Live motion coaching during sampling: what the solver still needs.
+				if (CalCtx.state == CalibrationState::Sampling && !CalCtx.sampleHint.empty())
+				{
+					ImVec4 hintCol =
+						CalCtx.sampleHintLevel >= 2 ? ImVec4(1.0f, 0.55f, 0.2f, 1.0f) :  // slow down
+						CalCtx.sampleHintLevel == 1 ? ImVec4(1.0f, 0.85f, 0.3f, 1.0f) :  // add motion
+						                              ImVec4(0.4f, 1.0f, 0.4f, 1.0f);    // on track
+					ImGui::Text("");
+					ImGui::PushStyleColor(ImGuiCol_Text, hintCol);
+					ImGui::TextWrapped("%s", CalCtx.sampleHint.c_str());
+					ImGui::PopStyleColor();
+				}
+
 				if (CalCtx.state == CalibrationState::None)
 				{
 					ImGui::Text("");
