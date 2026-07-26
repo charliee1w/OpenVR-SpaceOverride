@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <windows.h>
 #include <direct.h>
 
@@ -16,6 +17,12 @@ static FILE *g_diagCsv = nullptr;
 // The CSV can be opened/closed live from the server thread (overlay toggle) while
 // pose threads write rows — guard the handle.
 static std::mutex g_diagMutex;
+// Per-frame rows are accumulated in memory and written in batches. The previous
+// fflush-per-row hit the pose thread with a syscall + disk write on every row (up
+// to ~90/s on a sustained-gate stretch). Buffering turns that into one write per
+// ~few thousand rows; the tail (< kDiagFlushBytes) is flushed on close.
+static std::string g_diagBuf;
+static const size_t kDiagFlushBytes = 64 * 1024;
 static char g_sessionPath[MAX_PATH] = {};
 static char g_rollingPath[MAX_PATH] = {};
 static char g_diagPath[MAX_PATH] = {};
@@ -38,11 +45,12 @@ static void EnsureDir(const char *path)
 	_mkdir(tmp);
 }
 
-// V3-a: one session file per SteamVR start adds up — drop sessions older than 14 days.
-static void PruneOldSessionLogs(const char *logDir)
+// Drop matching files older than 14 days. One session log and (in fusion) one
+// per-frame CSV are written per SteamVR start, so both would grow without bound.
+static void PruneOldLogs(const char *logDir, const char *glob)
 {
 	char pattern[MAX_PATH];
-	snprintf(pattern, MAX_PATH, "%s\\session_*.log", logDir);
+	snprintf(pattern, MAX_PATH, "%s\\%s", logDir, glob);
 
 	FILETIME ftNow;
 	GetSystemTimeAsFileTime(&ftNow);
@@ -89,7 +97,8 @@ void OpenLogFile()
 	char logDir[MAX_PATH] = {};
 	snprintf(logDir, MAX_PATH, "%s\\OpenVR-SpaceOverride\\logs", localAppData);
 	EnsureDir(logDir);
-	PruneOldSessionLogs(logDir);
+	PruneOldLogs(logDir, "session_*.log");
+	PruneOldLogs(logDir, "fusion_diag_*.csv");
 
 	snprintf(g_rollingPath, MAX_PATH, "%s\\spaceoverride_driver.log", logDir);
 
@@ -182,8 +191,24 @@ void OpenDiagCsv()
 	g_diagCsv = fopen(g_diagPath, "w");
 	if (g_diagCsv)
 	{
-		fprintf(g_diagCsv, "t_ms,speed_mps,angspeed_rps,disp_cm,Kt,sig_cm,gated,event\n");
+		g_diagBuf.clear();
+		g_diagBuf.reserve(kDiagFlushBytes + 1024);
+		// Columns: time; mode; head motion; estimator innovation/gain/uncertainty;
+		// how large the correction currently is; the world head position (so a
+		// trajectory and its spatial coverage can be reconstructed); gate outcome.
+		fputs("t_ms,mode,speed_mps,angspeed_rps,disp_cm,Kt,sig_cm,corr_cm,corr_yaw_deg,wx,wy,wz,gated,event\n", g_diagCsv);
 		fflush(g_diagCsv);
+	}
+}
+
+// Caller must hold g_diagMutex.
+static void FlushDiagBufLocked()
+{
+	if (g_diagCsv && !g_diagBuf.empty())
+	{
+		fwrite(g_diagBuf.data(), 1, g_diagBuf.size(), g_diagCsv);
+		fflush(g_diagCsv);
+		g_diagBuf.clear();
 	}
 }
 
@@ -192,7 +217,7 @@ void CloseDiagCsv()
 	std::lock_guard<std::mutex> lock(g_diagMutex);
 	if (g_diagCsv)
 	{
-		fflush(g_diagCsv);
+		FlushDiagBufLocked();
 		fclose(g_diagCsv);
 		g_diagCsv = nullptr;
 	}
@@ -206,16 +231,26 @@ bool DiagCsvOpen()
 
 void LogDiagCsv(const char *fmt, ...)
 {
+	// Format into a small stack buffer, then append to the in-memory batch. No
+	// per-row file I/O: the batch is written only when it crosses kDiagFlushBytes
+	// (and on close), so the pose thread does at most one write per few thousand rows.
+	char row[256];
+	va_list args;
+	va_start(args, fmt);
+	int len = vsnprintf(row, sizeof row - 1, fmt, args);
+	va_end(args);
+	if (len < 0)
+		return;
+	if (len > (int)sizeof row - 2)
+		len = (int)sizeof row - 2;
+	row[len++] = '\n';
+
 	std::lock_guard<std::mutex> lock(g_diagMutex);
 	if (!g_diagCsv)
 		return;
-
-	va_list args;
-	va_start(args, fmt);
-	vfprintf(g_diagCsv, fmt, args);
-	va_end(args);
-	fputc('\n', g_diagCsv);
-	fflush(g_diagCsv);
+	g_diagBuf.append(row, len);
+	if (g_diagBuf.size() >= kDiagFlushBytes)
+		FlushDiagBufLocked();
 }
 
 tm TimeForLog()

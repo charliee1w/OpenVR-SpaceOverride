@@ -8,6 +8,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include <iostream>
 #include <algorithm>
 #include <cctype>
@@ -28,7 +29,8 @@ CalibrationContext CalCtx;
 // past calibration's quality could not be reviewed afterwards - which is exactly
 // what you need when repeat calibrations disagree. Append a one-line record per
 // completed calibration next to the driver's session logs.
-static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM)
+static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM,
+	int accepted, int rejAng, int rejLin, int coverageCells)
 {
 	char localAppData[MAX_PATH] = {};
 	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
@@ -57,6 +59,14 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  hmdScale=" << std::setprecision(5) << ctx.hmdScale
 		<< "  targetModelScale=" << ctx.targetModelScale
 		<< "  speed=" << (int)ctx.calibrationSpeed
+		// Distinguishes a well-covered calibration from a clumped one: accepted samples
+		// plus how many were rejected for moving too fast (angular vs linear), and how
+		// many distinct 10cm cells the accepted samples occupy. Many samples in few
+		// cells = clumped, which the RMS residual alone cannot reveal.
+		<< "  accepted=" << accepted
+		<< "  rej_ang=" << rejAng
+		<< "  rej_lin=" << rejLin
+		<< "  cells=" << coverageCells
 		<< "  tracker=" << ctx.trackerSerial
 		<< "\n";
 }
@@ -935,6 +945,28 @@ static bool g_havePrevSample = false;
 static double g_lastHintTime = 0;
 static double g_lastFastDropTime = 0;
 
+// Sampling diagnostics: how many candidate samples the speed gates rejected, split
+// by cause. Written to calibration.log so "the gates are too strict / the data is
+// sparse" is a measurable claim rather than a guess.
+static int g_rejAngCount = 0;
+static int g_rejLinCount = 0;
+
+// Distinct 10cm cells occupied by the accepted sample positions. Many samples in
+// few cells means the coverage is clumped even when the sample count is high -
+// exactly the failure mode a spread number alone hides.
+static int CoverageCells(const std::vector<Sample> &samples)
+{
+	std::set<long long> cells;
+	for (auto &s : samples)
+	{
+		long long cx = (long long)std::floor(s.target.trans.x() * 10.0);
+		long long cy = (long long)std::floor(s.target.trans.y() * 10.0);
+		long long cz = (long long)std::floor(s.target.trans.z() * 10.0);
+		cells.insert((cx * 73856093LL) ^ (cy * 19349663LL) ^ (cz * 83492791LL));
+	}
+	return (int)cells.size();
+}
+
 // RMS spread of the target (head tracker) positions collected so far. Rotation is
 // distance-preserving, so this equals the spread used later for the scale fit, and
 // it is what tells us whether the user has actually translated through space (the
@@ -972,6 +1004,8 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_havePrevSample = false;
 	g_lastHintTime = 0;
 	g_lastFastDropTime = 0;
+	g_rejAngCount = 0;
+	g_rejLinCount = 0;
 	ctx.sampleHint = "Move your head slowly through different angles";
 	ctx.sampleHintLevel = 1;
 	ctx.Log("Starting calibration...\n");
@@ -1183,6 +1217,9 @@ void CalibrationTick(double time)
 
 		if (tooFastAng || tooFastLin)
 		{
+			// Count rejections by cause so calibration.log can show whether the gates
+			// are actually starving the solve of samples.
+			if (tooFastLin) ++g_rejLinCount; else ++g_rejAngCount;
 			// This is why the bar can stall with no explanation: samples are being
 			// dropped. Tell the user, and hold the message briefly so it is readable.
 			ctx.sampleHint = tooFastLin
@@ -1300,7 +1337,8 @@ void CalibrationTick(double time)
 
 		ctx.validProfile = true;
 		SaveProfile(ctx);
-		LogCalibrationResult(ctx, rmsError * 1000.0, g_lastScaleSpread);
+		LogCalibrationResult(ctx, rmsError * 1000.0, g_lastScaleSpread,
+			(int)samples.size(), g_rejAngCount, g_rejLinCount, CoverageCells(samples));
 		CalCtx.Log("Finished calibration, profile saved\n");
 
 		if (CalCtx.notificationId != 0) {

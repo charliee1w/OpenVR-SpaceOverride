@@ -481,8 +481,11 @@ bool ServerTrackedDeviceProvider::FusionEkfUpdate(
 			QueryPerformanceCounter(&now);
 			QueryPerformanceFrequency(&freq);
 			double tms = (now.QuadPart - diagStart.QuadPart) * 1000.0 / (double)freq.QuadPart;
-			LogDiagCsv("%.1f,%.3f,%.3f,%.2f,%.4f,%.3f,1,%s",
+			double corrCm = sqrt(ekf.trans[0] * ekf.trans[0] + ekf.trans[1] * ekf.trans[1] + ekf.trans[2] * ekf.trans[2]) * 100.0;
+			double corrYaw = 2.0 * atan2(ekf.yawCorr.y, ekf.yawCorr.w) * 180.0 / 3.14159265358979;
+			LogDiagCsv("%.1f,F,%.3f,%.3f,%.2f,%.4f,%.3f,%.2f,%.2f,%.4f,%.4f,%.4f,1,%s",
 				tms, linSpeed, angSpeed, sqrt(r0sq) * 100.0, 0.0, sqrt(ekf.Pt) * 100.0,
+				corrCm, corrYaw, obsPos[0], obsPos[1], obsPos[2],
 				reset ? "reset" : "gate");
 		}
 		return false;
@@ -535,8 +538,11 @@ bool ServerTrackedDeviceProvider::FusionEkfUpdate(
 		if (sinceWrite >= 0.05)
 		{
 			double tms = (now.QuadPart - diagStart.QuadPart) * 1000.0 / (double)freq.QuadPart;
-			LogDiagCsv("%.1f,%.3f,%.3f,%.2f,%.4f,%.3f,0,",
-				tms, linSpeed, angSpeed, rCm, Kt, sqrt(ekf.Pt) * 100.0);
+			double corrCm = sqrt(ekf.trans[0] * ekf.trans[0] + ekf.trans[1] * ekf.trans[1] + ekf.trans[2] * ekf.trans[2]) * 100.0;
+			double corrYaw = 2.0 * atan2(ekf.yawCorr.y, ekf.yawCorr.w) * 180.0 / 3.14159265358979;
+			LogDiagCsv("%.1f,F,%.3f,%.3f,%.2f,%.4f,%.3f,%.2f,%.2f,%.4f,%.4f,%.4f,0,",
+				tms, linSpeed, angSpeed, rCm, Kt, sqrt(ekf.Pt) * 100.0,
+				corrCm, corrYaw, obsPos[0], obsPos[1], obsPos[2]);
 			diagLastWrite = now;
 		}
 	}
