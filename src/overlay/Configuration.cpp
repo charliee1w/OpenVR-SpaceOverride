@@ -146,9 +146,18 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 		auto &geometry = chaperone["geometry"].get<picojson::array>();
 
+		// The element type is a quad of 12 floats, so the array length must be an
+		// exact multiple of 12. The old sizing truncated (len*4/48 == len/12), which
+		// under-allocated for any non-multiple length and then wrote the full array
+		// into it -- a heap overflow (or a write through data() on an empty vector)
+		// driven by user-writable registry content.
+		const size_t floatsPerQuad = sizeof(ctx.chaperone.geometry[0]) / sizeof(float);
 		if (geometry.size() > 0)
 		{
-			ctx.chaperone.geometry.resize(geometry.size() * sizeof(float) / sizeof(ctx.chaperone.geometry[0]));
+			if (geometry.size() % floatsPerQuad != 0)
+				throw std::runtime_error("chaperone geometry length is not a multiple of " + std::to_string(floatsPerQuad));
+
+			ctx.chaperone.geometry.resize(geometry.size() / floatsPerQuad);
 			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), geometry.size());
 
 			ctx.chaperone.valid = true;
@@ -294,27 +303,84 @@ static void WriteRegistryKey(std::string str)
 	RegCloseKey(hkey);
 }
 
+static std::string BackupFilePath()
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return "";
+	return std::string(localAppData) + "\\OpenVR-SpaceOverride\\profile-backup.json";
+}
+
+static std::string ReadBackupFile()
+{
+	std::string path = BackupFilePath();
+	if (path.empty())
+		return "";
+
+	std::ifstream in(path);
+	if (!in)
+		return "";
+
+	std::stringstream ss;
+	ss << in.rdbuf();
+	return ss.str();
+}
+
 void LoadProfile(CalibrationContext &ctx)
 {
 	ctx.validProfile = false;
 
+	// The backup exists so a lost or unparseable registry profile is actually
+	// recoverable; it was previously written but never read, so it recovered nothing.
+	// Try the registry first, then fall back to the on-disk mirror.
 	auto str = ReadRegistryKey();
+	bool fromBackup = false;
 	if (str == "")
 	{
-		std::cout << "Profile is empty" << std::endl;
-		ctx.Clear();
-		return;
+		str = ReadBackupFile();
+		fromBackup = !str.empty();
+		if (!fromBackup)
+		{
+			std::cout << "Profile is empty" << std::endl;
+			ctx.Clear();
+			return;
+		}
+		std::cout << "Registry profile missing, restoring from profile-backup.json" << std::endl;
 	}
 
 	try
 	{
 		std::stringstream io(str);
 		ParseProfile(ctx, io);
-		std::cout << "Loaded profile" << std::endl;
+		std::cout << (fromBackup ? "Loaded profile from backup" : "Loaded profile") << std::endl;
+		if (fromBackup)
+			SaveProfile(ctx); // re-seed the registry so the recovery is durable
 	}
 	catch (const std::runtime_error &e)
 	{
 		std::cerr << "Error loading profile: " << e.what() << std::endl;
+
+		if (!fromBackup)
+		{
+			// Registry content was present but unparseable - try the mirror before
+			// giving up and leaving the user with no calibration.
+			std::string backup = ReadBackupFile();
+			if (!backup.empty())
+			{
+				try
+				{
+					std::stringstream io2(backup);
+					ParseProfile(ctx, io2);
+					std::cout << "Recovered profile from profile-backup.json" << std::endl;
+					SaveProfile(ctx);
+				}
+				catch (const std::runtime_error &e2)
+				{
+					std::cerr << "Backup profile also failed to load: " << e2.what() << std::endl;
+				}
+			}
+		}
 	}
 }
 
