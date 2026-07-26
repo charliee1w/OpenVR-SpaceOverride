@@ -175,25 +175,35 @@ void ServerTrackedDeviceProvider::RunFrame()
 	if (serr == vr::VRSettingsError_None && wantDiag != fusionDiag)
 	{
 		fusionDiag = wantDiag;
-		// The CSV only records fusion-path rows, so opening it in override mode
-		// produced a header and nothing else, forever.
-		if (fusionDiag && fusionMode)
-		{
-			OpenDiagCsv();
-			// diagStart/diagLastWrite are read and written by the HMD pose thread in
-			// FusionEkfUpdate, which holds configMutex shared for the whole callback.
-			// Take it exclusive here so enabling the CSV mid-session cannot race the
-			// timestamps. Lock order stays configMutex -> g_diagMutex (OpenDiagCsv is
-			// called first, and takes only g_diagMutex).
-			std::unique_lock<std::shared_mutex> lock(configMutex);
-			QueryPerformanceCounter(&diagStart);
-			diagLastWrite = LARGE_INTEGER{};
-		}
-		else
-		{
-			CloseDiagCsv();
-		}
 		LOG("fusion diagnostic CSV -> %s", fusionDiag ? "on" : "off");
+	}
+
+	// Reconcile the CSV against BOTH settings every poll. Driving it only from a
+	// change in fusionDiag meant toggling fusionMode never opened or closed it:
+	// enabling diagnostics in override then switching to fusion left it shut, and
+	// switching from fusion back to override left it open collecting nothing.
+	{
+		const bool wantCsv = fusionMode && fusionDiag;
+		if (wantCsv != DiagCsvOpen())
+		{
+			if (wantCsv)
+			{
+				OpenDiagCsv();
+				// diagStart/diagLastWrite are read and written by the HMD pose thread
+				// in FusionEkfUpdate, which holds configMutex shared for the whole
+				// callback. Take it exclusive here so enabling the CSV mid-session
+				// cannot race the timestamps. Lock order stays
+				// configMutex -> g_diagMutex (OpenDiagCsv takes only the latter).
+				std::unique_lock<std::shared_mutex> lock(configMutex);
+				QueryPerformanceCounter(&diagStart);
+				diagLastWrite = LARGE_INTEGER{};
+			}
+			else
+			{
+				CloseDiagCsv();
+			}
+			LOG("fusion diagnostic CSV file -> %s", wantCsv ? "open" : "closed");
+		}
 	}
 }
 
@@ -962,19 +972,25 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 			dtPos = dt < 0.3 ? (dt > dtFloor ? dt : dtFloor) : 0.3;
 	}
 
-	// V1: bounded reconvergence — a far candidate is approached at
-	// <= kMaxCatchupSpeed instead of freeze-then-snap after a 250 ms hold.
-	// Invariant: the published pose never moves more than kMaxCatchupSpeed*dt
-	// per frame. Transient spikes cost at most one bounded step each way.
-	const double kMaxCatchupSpeed = 3.0;   // m/s
-	const double kReconvergeRotTau = 0.10; // s
+	// The slew budget must NOT reuse dtPos. dtPos is elapsed time since the last
+	// accepted frame and saturates at 0.3 s after any gap, which would license a
+	// 0.9 m step in a single published frame — the opposite of a rate limit. Detection
+	// wants real elapsed time; the budget wants the publish interval, capped at a
+	// couple of frames so a gap cannot buy a large step.
+	const double dtSlew = dtPos < 2.0 / displayHz ? dtPos : 2.0 / displayHz;
+
+	// V1: bounded reconvergence — a far candidate is approached at <= kMaxCatchupSpeed
+	// (and <= kMaxCatchupAngSpeed) instead of freeze-then-snap after a 250 ms hold.
+	const double kMaxCatchupSpeed = 3.0;    // m/s
+	const double kMaxCatchupAngSpeed = 3.0; // rad/s
+	const double kReconvergeRotTau = 0.10;  // s
 	if (lastGoodHmd.valid && (reconverging || ShouldHoldForJump(candPos, dtPos)))
 	{
 		const double dx = candPos[0] - lastGoodHmd.position[0];
 		const double dy = candPos[1] - lastGoodHmd.position[1];
 		const double dz = candPos[2] - lastGoodHmd.position[2];
 		const double dist = sqrt(dx * dx + dy * dy + dz * dz);
-		const double maxStep = kMaxCatchupSpeed * dtPos;
+		const double maxStep = kMaxCatchupSpeed * dtSlew;
 
 		if (dist > maxStep)
 		{
@@ -989,8 +1005,21 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 				lastGoodHmd.position[1] + dy * s,
 				lastGoodHmd.position[2] + dz * s
 			};
-			const vr::HmdQuaternion_t stepRot = NlerpQuat(lastGoodHmd.rotation, candRot,
-				dtPos / (dtPos + kReconvergeRotTau));
+			// Rotation was previously a bare first-order lag with no rate cap, so a
+			// large orientation discrepancy whipped the view at hundreds of deg/s.
+			// Clamp the interpolation so the angular step honours kMaxCatchupAngSpeed.
+			double tRot = dtSlew / (dtSlew + kReconvergeRotTau);
+			{
+				double dot = lastGoodHmd.rotation.w * candRot.w + lastGoodHmd.rotation.x * candRot.x
+					+ lastGoodHmd.rotation.y * candRot.y + lastGoodHmd.rotation.z * candRot.z;
+				dot = fabs(dot);
+				if (dot > 1.0) dot = 1.0;
+				const double angle = 2.0 * acos(dot); // total discrepancy, radians
+				const double maxAngStep = kMaxCatchupAngSpeed * dtSlew;
+				if (angle > 1e-9 && angle * tRot > maxAngStep)
+					tRot = maxAngStep / angle;
+			}
+			const vr::HmdQuaternion_t stepRot = NlerpQuat(lastGoodHmd.rotation, candRot, tRot);
 
 			// Publish the slew as an absolute world pose. Writing it into vecPosition
 			// while leaving a worldFromDriver correction in place would re-apply that
@@ -1045,7 +1074,12 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 		reconverging = false;
 	}
 
-	StoreLastGoodHmd(candRot, candPos, pose.vecVelocity, pose.vecAngularVelocity);
+	// Velocities are driver-space; lastGoodHmd is world-space and ApplyLastGoodHmd
+	// republishes it with worldFromDriver collapsed to identity, so rotate them here
+	// or a held frame reports velocity turned by the correction's yaw.
+	vr::HmdVector3d_t worldVel = quaternionRotateVector(pose.qWorldFromDriverRotation, pose.vecVelocity);
+	vr::HmdVector3d_t worldAngVel = quaternionRotateVector(pose.qWorldFromDriverRotation, pose.vecAngularVelocity);
+	StoreLastGoodHmd(candRot, candPos, worldVel.v, worldAngVel.v);
 	for (int i = 0; i < 3; i++)
 		diag.lastHmdPos[i] = candPos[i];
 	QueryPerformanceCounter(&diag.lastHmdPosTime);
@@ -1314,10 +1348,15 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 							const double slamScale = SlamToCorrectedScale();
 							const double scaled[3] = { dsx * slamScale, dsy * slamScale, dsz * slamScale };
 							vr::HmdVector3d_t comp = quaternionRotateVector(drift.rotation, scaled);
-							for (int i = 0; i < 3; i++)
 							{
-								ekf.trans[i] -= comp.v[i];
-								drift.translation.v[i] -= comp.v[i];
+								// Other device pose threads read drift under driftMutex;
+								// this write needs it too.
+								std::lock_guard<std::mutex> driftLock(driftMutex);
+								for (int i = 0; i < 3; i++)
+								{
+									ekf.trans[i] -= comp.v[i];
+									drift.translation.v[i] -= comp.v[i];
+								}
 							}
 							++diag.slamSteps;
 							skipUpdate = true; // mid-step disparity is garbage; resume next frame
@@ -1534,7 +1573,13 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.poseTimeOffset = 0;
 				}
 				else {
+					// SLAM fallback publishes a real pose, so it must go through the
+					// gate too. Skipping it left lastGoodHmd frozen at the pre-outage
+					// position for the whole outage: when the tracker returned, the
+					// gate measured against a stale anchor and slewed the view back to
+					// where the head had been seconds earlier before catching up.
 					ApplyDrift(pose);
+					GatePublish(pose, displayHz, linSpeed);
 				}
 			}
 		}

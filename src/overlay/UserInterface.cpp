@@ -419,9 +419,18 @@ void UserInterface::Render(bool runningInOverlay)
 				ImGui::Spacing();
 				ImGui::Separator();
 				ImGui::Spacing();
+
+				ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
+				// These are applied only on the override path, so in fusion they are
+				// inert. Saying so beats letting someone tune a slider that does nothing.
+				if (fusionMode)
+				{
+					ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f),
+						"In Fusion mode, Prediction Time, Enable Angular Velocity and headset-tracker\n"
+						"smoothing have no effect - the headset's own tracking supplies those.");
+				}
 			}
 
-			ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "NOTE: All settings below require re-calibration to be applied");
 			ImGui::Spacing();
 			ImGui::Text("Tip: hover over the settings to see additional information.");
 			ImGui::Spacing();

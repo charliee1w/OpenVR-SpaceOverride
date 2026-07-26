@@ -35,7 +35,7 @@ Both modes end in the same place — head and body in one aligned space. They di
 | Tracker loses line of sight | you feel it | correction freezes, SLAM carries |
 | Head and body in one space | by construction | by continuous correction |
 
-Consequences of the inversion: losing sight of the tracker is close to a non-event, tracker noise is filtered into a slowly-varying correction rather than displayed, and SLAM relocation steps — the moment the headset suddenly re-decides where it is — are detected against the tracker and cancelled in the same frame, so the published pose stays put while SLAM jumps underneath it.
+Consequences of the inversion: losing sight of the tracker is close to a non-event, tracker noise is filtered into a slowly-varying correction rather than displayed, and SLAM relocation steps — the moment the headset suddenly re-decides where it is — are detected against the tracker and the translation component is cancelled in the same frame, so the published pose stays put while SLAM jumps underneath it. Cancellation is deliberately conservative: it requires the head to be nearly still, applies to translation only (a yaw relocation is left to the estimator), and is rate-limited, so it suppresses the common case rather than every case.
 
 The estimator is an error-state Kalman filter over a yaw + translation correction, with Mahalanobis innovation gating for outlier rejection and a covariance reset when disagreement persists. Measurement noise is inflated with motion, which is how tracker-vs-SLAM latency skew is absorbed rather than chased. See `FusionEkfUpdate` in `src/driver/ServerTrackedDeviceProvider.cpp`.
 
@@ -167,7 +167,7 @@ Relative to upstream, this fork adds:
 
 - **Fusion mode** — an inverted pose path where the headset's SLAM drives the view and the mounted tracker only observes the SLAM→lighthouse correction, estimated by an error-state Kalman filter with innovation gating and covariance-reset re-anchoring, including detection and same-frame cancellation of SLAM relocation steps.
 - **Live mode switching** from the overlay, without a SteamVR restart, with estimator state reset and a bounded transition on switch.
-- **Publish gates** — finite-value checks, and bounded reconvergence so a far-away candidate pose is slewed toward rather than snapped to. The gate runs on the composed world pose, so it covers both the tracker-driven pose and the fusion correction; within a mode, and across a live mode switch, the published head pose is rate-limited rather than stepped.
+- **Publish gates** — finite-value checks, and bounded reconvergence so a far-away candidate pose is slewed toward rather than snapped to. The gate runs on the composed world pose, so it covers both the tracker-driven pose and the fusion correction, and applies on the SLAM-fallback path as well. Position and rotation are each rate-limited, with the slew budget taken from the publish interval rather than from elapsed time.
 - **Brief tracker-loss handling** — the last good pose is held for a short window before falling back.
 - **Head tracker quashing** so applications don't bind it as a body joint.
 - **Automatic session logging** with pruning of old session files, plus the optional per-frame diagnostic CSV.
