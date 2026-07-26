@@ -169,6 +169,12 @@ void ServerTrackedDeviceProvider::RunFrame()
 		if (fusionDiag)
 		{
 			OpenDiagCsv();
+			// diagStart/diagLastWrite are read and written by the HMD pose thread in
+			// FusionEkfUpdate, which holds configMutex shared for the whole callback.
+			// Take it exclusive here so enabling the CSV mid-session cannot race the
+			// timestamps. Lock order stays configMutex -> g_diagMutex (OpenDiagCsv is
+			// called first, and takes only g_diagMutex).
+			std::unique_lock<std::shared_mutex> lock(configMutex);
 			QueryPerformanceCounter(&diagStart);
 			diagLastWrite = LARGE_INTEGER{};
 		}
