@@ -341,6 +341,18 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 	char buf[256];
 	snprintf(buf, sizeof buf, "Got %zd samples with %zd delta samples\n", samples.size(), deltas.size());
 	CalCtx.Log(buf);
+
+	// With no usable deltas the cross-covariance is the zero matrix and the SVD below
+	// yields an arbitrary (identity-like) rotation that carries no information. Signal
+	// it rather than returning a confident-looking result; the caller aborts.
+	if (deltas.empty())
+	{
+		CalCtx.Log("No usable rotation deltas - head movement was too small to solve rotation.\n");
+		return Eigen::Vector3d(std::numeric_limits<double>::quiet_NaN(),
+			std::numeric_limits<double>::quiet_NaN(),
+			std::numeric_limits<double>::quiet_NaN());
+	}
+
 	Eigen::MatrixXd refPoints(deltas.size(), 3), targetPoints(deltas.size(), 3);
 
 	for (size_t i = 0; i < deltas.size(); i++)
@@ -370,12 +382,19 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 	return euler;
 }
 
-static const double ScaleSpreadThreshold = 0.1;
+// Minimum positional spread (RMS, metres) required to fit headset scale at all.
+// Empirically this is the reliable discriminator: logged calibrations at spread
+// 0.235-0.286 m all landed within 0.5% of each other, while one at 0.160 m fitted
+// a scale ~3% off. Matches the live coach's threshold, so "cover more space" and
+// "scale accepted" agree. Below this, scale falls back to exactly 1.
+static const double ScaleSpreadThreshold = 0.20;
 static const double MinCalibratedScale = 0.9;
 static const double MaxCalibratedScale = 1.1;
-// Accept a fitted headset scale only when the data determines it this tightly.
-// A scale wrong by more than this costs less than a noisy estimate that changes
-// every calibration, so an undetermined fit falls back to exactly 1.
+// Secondary guard for the case where spread is adequate but residuals are noisy.
+// Note: the formal standard error only captures random scatter, not the
+// ill-conditioning bias that dominates at low spread -- it reported 0.2% on the
+// 0.160 m fit that was actually ~3% wrong -- which is why the spread gate above,
+// not this, is the primary check.
 static const double MaxScaleStdErr = 0.005;
 
 Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
@@ -449,7 +468,10 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
-		snprintf(buf, sizeof buf, "Not enough positional movement to estimate headset scale (spread %.2f m), assuming 1\n", spread);
+		snprintf(buf, sizeof buf,
+			"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m), assuming 1.\n"
+			"Walk and crouch to cover more of your play space while calibrating; head rotation alone cannot determine scale.\n",
+			spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
 		return 1.0;
 	}
@@ -1245,8 +1267,10 @@ void CalibrationTick(double time)
 		snprintf(buf2, sizeof buf2, "Calibration residual error (RMS): %.1f mm\n", rmsError * 1000.0);
 		CalCtx.Log(buf2);
 
-		// TODO: this is an problem for future considering automatic calibration fixing.
-		if (rmsError > 0.1)
+		// Written as !(x <= limit) so a NaN residual fails the gate. `rmsError > 0.1`
+		// is false for NaN, which would have let a degenerate solve through to
+		// SaveProfile and then into the pose pipeline.
+		if (!(rmsError <= 0.1))
 		{
 			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
 			AbortAndRestoreProfile(ctx);
