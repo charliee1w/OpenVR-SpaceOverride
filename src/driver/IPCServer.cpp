@@ -138,11 +138,13 @@ void IPCServer::RunThread(IPCServer *_this)
 		}
 	}
 
-	for (auto &pipeInst : _this->pipes)
+	// ClosePipeInstance erases from `pipes`, which invalidates the iterator the
+	// range-for is holding; incrementing it afterwards walked a freed node. Drain
+	// the set instead so no iterator outlives the element it points at.
+	while (!_this->pipes.empty())
 	{
-		_this->ClosePipeInstance(pipeInst);
+		_this->ClosePipeInstance(*_this->pipes.begin());
 	}
-	_this->pipes.clear();
 }
 
 BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
