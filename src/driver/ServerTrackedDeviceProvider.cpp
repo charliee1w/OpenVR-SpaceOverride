@@ -150,11 +150,20 @@ void ServerTrackedDeviceProvider::RunFrame()
 		{
 			std::unique_lock<std::shared_mutex> lock(configMutex);
 			fusionMode = wantFusion;
-			// Whichever estimator takes over re-converges from scratch; the V1 publish
-			// gate bounds the visual transition to <= 3 m/s, so the switch is a slew.
+			// Whichever estimator takes over re-converges from scratch. lastGoodHmd is
+			// world-space in both modes, so the gate bounds the transition to <= 3 m/s
+			// across the switch. Every estimator that carries mode-specific state must
+			// be reset here, or the first frames after a switch mix the two modes.
 			ekf = FusionEkf{};
 			fusion = FusionState{};
-			drift.valid = false;
+			reconverging = false;
+			headFilter.reset();
+			headVel.reset();
+			trackerFilter.reset();
+			{
+				std::lock_guard<std::mutex> driftLock(driftMutex);
+				drift.valid = false;
+			}
 			drift.rotationFilter.reset();
 			drift.translationFilter.reset();
 		}
@@ -166,7 +175,9 @@ void ServerTrackedDeviceProvider::RunFrame()
 	if (serr == vr::VRSettingsError_None && wantDiag != fusionDiag)
 	{
 		fusionDiag = wantDiag;
-		if (fusionDiag)
+		// The CSV only records fusion-path rows, so opening it in override mode
+		// produced a header and nothing else, forever.
+		if (fusionDiag && fusionMode)
 		{
 			OpenDiagCsv();
 			// diagStart/diagLastWrite are read and written by the HMD pose thread in
@@ -291,7 +302,10 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 
 	if (!cmd.enabled)
 	{
-		drift.valid = false;
+		{
+			std::lock_guard<std::mutex> driftLock(driftMutex);
+			drift.valid = false;
+		}
 		drift.rotationFilter.reset();
 		drift.translationFilter.reset();
 		headFilter.reset();
@@ -518,13 +532,22 @@ bool ServerTrackedDeviceProvider::FusionEkfUpdate(
 	}
 
 	// Publish into the shared correction container (ApplyDrift / slamSync / fallback).
-	drift.rotation = ekf.yawCorr;
-	drift.translation.v[0] = ekf.trans[0];
-	drift.translation.v[1] = ekf.trans[1];
-	drift.translation.v[2] = ekf.trans[2];
-	drift.valid = true;
+	// Other device pose threads read this concurrently, so it needs driftMutex.
+	{
+		std::lock_guard<std::mutex> lock(driftMutex);
+		drift.rotation = ekf.yawCorr;
+		drift.translation.v[0] = ekf.trans[0];
+		drift.translation.v[1] = ekf.trans[1];
+		drift.translation.v[2] = ekf.trans[2];
+		drift.valid = true;
+	}
 	return true;
 }
+
+// Fastest plausible head motion. Used to reject tracker samples, to flag a speed
+// reject in diagnostics, and as the jump gate's speed limb; these must agree, so
+// they share one definition.
+static const double kMaxPlausibleHeadSpeed = 8.0; // m/s
 
 static double SoftGateWeight(double speed, double softMax, double hardMax)
 {
@@ -601,16 +624,35 @@ void ServerTrackedDeviceProvider::UpdateDrift(const vr::HmdQuaternion_t& correct
 
 	double dt = FilterStep(drift.lastUpdate, drift.valid);
 
-	drift.rotation = drift.rotationFilter.filter(instRot, dt);
-	drift.translation = drift.translationFilter.filter(instTrans, dt);
-	drift.valid = true;
+	// The filters are only ever touched by the HMD pose thread; the published
+	// rotation/translation are read by other device threads, so guard those.
+	vr::HmdQuaternion_t newRot = drift.rotationFilter.filter(instRot, dt);
+	vr::HmdVector3d_t newTrans = drift.translationFilter.filter(instTrans, dt);
+	{
+		std::lock_guard<std::mutex> lock(driftMutex);
+		drift.rotation = newRot;
+		drift.translation = newTrans;
+		drift.valid = true;
+	}
 }
 
-void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
+bool ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose)
 {
+	// Snapshot under driftMutex: non-HMD pose threads reach this via slamSync while
+	// the HMD thread is writing the correction, and configMutex is only held shared.
+	vr::HmdQuaternion_t driftRotation;
+	vr::HmdVector3d_t driftTranslation;
+	{
+		std::lock_guard<std::mutex> lock(driftMutex);
+		if (!drift.valid)
+			return false;
+		driftRotation = drift.rotation;
+		driftTranslation = drift.translation;
+	}
+
 	double slamScale = SlamToCorrectedScale();
 
-	pose.qWorldFromDriverRotation = quaternionNormalize(drift.rotation * pose.qWorldFromDriverRotation);
+	pose.qWorldFromDriverRotation = quaternionNormalize(driftRotation * pose.qWorldFromDriverRotation);
 
 	pose.vecPosition[0] *= slamScale;
 	pose.vecPosition[1] *= slamScale;
@@ -621,10 +663,50 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 		pose.vecWorldFromDriverTranslation[1] * slamScale,
 		pose.vecWorldFromDriverTranslation[2] * slamScale
 	};
-	vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(drift.rotation, scaledTranslation);
-	pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + drift.translation.v[0];
-	pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + drift.translation.v[1];
-	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + drift.translation.v[2];
+	vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(driftRotation, scaledTranslation);
+	pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + driftTranslation.v[0];
+	pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + driftTranslation.v[1];
+	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + driftTranslation.v[2];
+	return true;
+}
+
+// Full driver->world composition for a DriverPose_t. The publish gate must run on
+// this, not on vecPosition: in fusion the correction lives in qWorldFromDriverRotation
+// and vecWorldFromDriverTranslation, so gating vecPosition alone leaves the quantity
+// that actually moves the view completely unguarded.
+static void ComposeWorldPose(const vr::DriverPose_t& pose, vr::HmdQuaternion_t& outRot, double outPos[3])
+{
+	outRot = quaternionNormalize(pose.qWorldFromDriverRotation * pose.qRotation * pose.qDriverFromHeadRotation);
+
+	vr::HmdVector3d_t headLocal = quaternionRotateVector(pose.qRotation, pose.vecDriverFromHeadTranslation);
+	double driverLocal[3] = {
+		pose.vecPosition[0] + headLocal.v[0],
+		pose.vecPosition[1] + headLocal.v[1],
+		pose.vecPosition[2] + headLocal.v[2]
+	};
+	vr::HmdVector3d_t world = quaternionRotateVector(pose.qWorldFromDriverRotation, driverLocal);
+	outPos[0] = world.v[0] + pose.vecWorldFromDriverTranslation[0];
+	outPos[1] = world.v[1] + pose.vecWorldFromDriverTranslation[1];
+	outPos[2] = world.v[2] + pose.vecWorldFromDriverTranslation[2];
+}
+
+// Publishes an absolute world pose by collapsing the driver/head transforms to
+// identity. Valid in both modes: SteamVR only consumes the composition, and the
+// override path already publishes this way.
+static void WriteWorldPose(vr::DriverPose_t& pose, const vr::HmdQuaternion_t& worldRot, const double worldPos[3])
+{
+	pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
+	pose.vecWorldFromDriverTranslation[0] = 0;
+	pose.vecWorldFromDriverTranslation[1] = 0;
+	pose.vecWorldFromDriverTranslation[2] = 0;
+	pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
+	pose.vecDriverFromHeadTranslation[0] = 0;
+	pose.vecDriverFromHeadTranslation[1] = 0;
+	pose.vecDriverFromHeadTranslation[2] = 0;
+	pose.qRotation = worldRot;
+	pose.vecPosition[0] = worldPos[0];
+	pose.vecPosition[1] = worldPos[1];
+	pose.vecPosition[2] = worldPos[2];
 }
 
 bool ServerTrackedDeviceProvider::IsFiniteVec3(const double v[3])
@@ -735,7 +817,7 @@ bool ServerTrackedDeviceProvider::FetchTrackerSample(
 	// (session_20260717_231753: HMD_JUMP_HOLD dist~9000m speed=0 from poisoned GetRaw).
 	// Max age 150 ms (aligned with P1-a last-good hold); position dead-reckoned by age.
 	const double kCacheMaxAgeSec = 0.15;
-	const double maxAcceptLinSpeed = 8.0;
+	const double maxAcceptLinSpeed = kMaxPlausibleHeadSpeed;
 
 	outLinSpeed = 0.0;
 
@@ -776,18 +858,16 @@ bool ServerTrackedDeviceProvider::FetchTrackerSample(
 	return true;
 }
 
-void ServerTrackedDeviceProvider::StoreLastGoodHmd(const vr::DriverPose_t& pose)
+void ServerTrackedDeviceProvider::StoreLastGoodHmd(const vr::HmdQuaternion_t& worldRot,
+	const double worldPos[3], const double velocity[3], const double angularVelocity[3])
 {
-	lastGoodHmd.rotation = pose.qRotation;
-	lastGoodHmd.position[0] = pose.vecPosition[0];
-	lastGoodHmd.position[1] = pose.vecPosition[1];
-	lastGoodHmd.position[2] = pose.vecPosition[2];
-	lastGoodHmd.velocity[0] = pose.vecVelocity[0];
-	lastGoodHmd.velocity[1] = pose.vecVelocity[1];
-	lastGoodHmd.velocity[2] = pose.vecVelocity[2];
-	lastGoodHmd.angularVelocity[0] = pose.vecAngularVelocity[0];
-	lastGoodHmd.angularVelocity[1] = pose.vecAngularVelocity[1];
-	lastGoodHmd.angularVelocity[2] = pose.vecAngularVelocity[2];
+	lastGoodHmd.rotation = worldRot;
+	for (int i = 0; i < 3; i++)
+	{
+		lastGoodHmd.position[i] = worldPos[i];
+		lastGoodHmd.velocity[i] = velocity[i];
+		lastGoodHmd.angularVelocity[i] = angularVelocity[i];
+	}
 	QueryPerformanceCounter(&lastGoodHmd.timestamp);
 	lastGoodHmd.valid = true;
 }
@@ -804,18 +884,8 @@ bool ServerTrackedDeviceProvider::ApplyLastGoodHmd(vr::DriverPose_t& pose, doubl
 	if (age < 0.0 || age > maxAgeSec)
 		return false;
 
-	pose.qWorldFromDriverRotation = { 1, 0, 0, 0 };
-	pose.vecWorldFromDriverTranslation[0] = 0;
-	pose.vecWorldFromDriverTranslation[1] = 0;
-	pose.vecWorldFromDriverTranslation[2] = 0;
-	pose.qDriverFromHeadRotation = { 1, 0, 0, 0 };
-	pose.vecDriverFromHeadTranslation[0] = 0;
-	pose.vecDriverFromHeadTranslation[1] = 0;
-	pose.vecDriverFromHeadTranslation[2] = 0;
-	pose.qRotation = lastGoodHmd.rotation;
-	pose.vecPosition[0] = lastGoodHmd.position[0];
-	pose.vecPosition[1] = lastGoodHmd.position[1];
-	pose.vecPosition[2] = lastGoodHmd.position[2];
+	// lastGoodHmd is world-space, so publish it as an absolute world pose.
+	WriteWorldPose(pose, lastGoodHmd.rotation, lastGoodHmd.position);
 	for (int i = 0; i < 3; i++)
 	{
 		pose.vecVelocity[i] = lastGoodHmd.velocity[i];
@@ -843,7 +913,7 @@ bool ServerTrackedDeviceProvider::ShouldHoldForJump(const double newPos[3], doub
 
 	// Absolute snap (single frame teleport) or impossible speed.
 	const double jumpThreshM = 0.35;
-	const double maxSpeedMps = 8.0;
+	const double maxSpeedMps = kMaxPlausibleHeadSpeed;
 	if (dist > jumpThreshM)
 		return true;
 	if (dtSec > 1e-4 && (dist / dtSec) > maxSpeedMps)
@@ -853,9 +923,15 @@ bool ServerTrackedDeviceProvider::ShouldHoldForJump(const double newPos[3], doub
 
 bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double displayHz, double linSpeed)
 {
+	// Gate the COMPOSED world pose. Gating vecPosition alone guarded only the override
+	// path's coordinate; in fusion the correction lives in the worldFromDriver fields,
+	// so the quantity that actually moves the view passed through unchecked.
+	vr::HmdQuaternion_t candRot;
+	double candPos[3];
+	ComposeWorldPose(pose, candRot, candPos);
+
 	// P0-b: non-finite → hold last good or drop.
-	const double candPos[3] = { pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2] };
-	if (!IsFiniteQuat(pose.qRotation) || !IsFiniteVec3(candPos))
+	if (!IsFiniteQuat(candRot) || !IsFiniteVec3(candPos))
 	{
 		++diag.nonFiniteDrops;
 		if (ApplyLastGoodHmd(pose, 0.15))
@@ -908,14 +984,23 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 			reconverging = true;
 
 			const double s = maxStep / dist;
-			pose.vecPosition[0] = lastGoodHmd.position[0] + dx * s;
-			pose.vecPosition[1] = lastGoodHmd.position[1] + dy * s;
-			pose.vecPosition[2] = lastGoodHmd.position[2] + dz * s;
-			pose.qRotation = NlerpQuat(lastGoodHmd.rotation, pose.qRotation,
+			const double stepPos[3] = {
+				lastGoodHmd.position[0] + dx * s,
+				lastGoodHmd.position[1] + dy * s,
+				lastGoodHmd.position[2] + dz * s
+			};
+			const vr::HmdQuaternion_t stepRot = NlerpQuat(lastGoodHmd.rotation, candRot,
 				dtPos / (dtPos + kReconvergeRotTau));
+
+			// Publish the slew as an absolute world pose. Writing it into vecPosition
+			// while leaving a worldFromDriver correction in place would re-apply that
+			// correction on top of an already-world-space value.
+			WriteWorldPose(pose, stepRot, stepPos);
+			double stepVel[3];
 			for (int i = 0; i < 3; i++)
 			{
-				pose.vecVelocity[i] = (pose.vecPosition[i] - lastGoodHmd.position[i]) / dtPos;
+				stepVel[i] = (stepPos[i] - lastGoodHmd.position[i]) / dtPos;
+				pose.vecVelocity[i] = stepVel[i];
 				pose.vecAngularVelocity[i] = 0.0;
 			}
 
@@ -935,6 +1020,17 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 					dist, dtPos, linSpeed, kMaxCatchupSpeed);
 				diag.lastJumpLog = now;
 			}
+
+			// The slew is a fabricated catch-up trajectory, not a measurement. Record
+			// it as last-good so the next frame is bounded against what was actually
+			// published, and return false so the caller skips drift bookkeeping rather
+			// than feeding the fabrication back into the estimator.
+			StoreLastGoodHmd(stepRot, stepPos, stepVel, pose.vecAngularVelocity);
+			for (int i = 0; i < 3; i++)
+				diag.lastHmdPos[i] = stepPos[i];
+			QueryPerformanceCounter(&diag.lastHmdPosTime);
+			diag.haveLastHmdPos = true;
+			return false;
 		}
 		else
 		{
@@ -949,10 +1045,9 @@ bool ServerTrackedDeviceProvider::GatePublish(vr::DriverPose_t& pose, double dis
 		reconverging = false;
 	}
 
-	StoreLastGoodHmd(pose);
-	diag.lastHmdPos[0] = pose.vecPosition[0];
-	diag.lastHmdPos[1] = pose.vecPosition[1];
-	diag.lastHmdPos[2] = pose.vecPosition[2];
+	StoreLastGoodHmd(candRot, candPos, pose.vecVelocity, pose.vecAngularVelocity);
+	for (int i = 0; i < 3; i++)
+		diag.lastHmdPos[i] = candPos[i];
 	QueryPerformanceCounter(&diag.lastHmdPosTime);
 	diag.haveLastHmdPos = true;
 	return true;
@@ -1041,7 +1136,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			double trackerAngVel[3] = { 0, 0, 0 };
 			double linSpeed = 0.0;
 			const bool trackerPoseOk = FetchTrackerSample(trackerQuat, rawTrackerPos, trackerVel, trackerAngVel, linSpeed);
-			const bool speedReject = !trackerPoseOk && linSpeed > 8.0;
+			const bool speedReject = !trackerPoseOk && linSpeed > kMaxPlausibleHeadSpeed;
 
 			// P2-b: first solid OK starts "play" counters (ignore pre-cal BAD noise).
 			if (trackerPoseOk && !diag.playPrimed)
@@ -1088,11 +1183,16 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					}
 					if (allowLog)
 					{
+						bool cacheValid;
+						{
+							std::lock_guard<std::mutex> cacheLock(trackerCacheMutex);
+							cacheValid = cachedTracker.valid;
+						}
 						LOG("tracker %s speed=%.2f reject_speed=%d cache=%d",
 							trackerPoseOk ? "OK" : "BAD",
 							linSpeed,
 							speedReject ? 1 : 0,
-							cachedTracker.valid ? 1 : 0);
+							cacheValid ? 1 : 0);
 						diag.lastBadLog = now;
 					}
 					diag.lastTrackerOk = trackerPoseOk;
@@ -1104,6 +1204,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				double hb = (now.QuadPart - diag.lastHeartbeat.QuadPart) / (double)freq.QuadPart;
 				if (hb >= 60.0)
 				{
+					// disp_* is the estimator's own innovation and is NOT comparable between modes:
+					// in fusion it is the EKF post-yaw residual, in override the
+					// soft-gated drift residual. Compare like with like.
 					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu holds=%llu lg_holds=%llu speed_rej=%llu fallback=%llu nonfinite=%llu enabled=%d mode=%c disp_avg=%.1fcm disp_max=%.1fcm slam_steps=%llu sig=%.2fcm",
 						(unsigned long long)diag.frames,
 						(unsigned long long)diag.trackerOkFrames,
@@ -1119,7 +1222,10 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						diag.dispN ? diag.dispSumCm / (double)diag.dispN : 0.0,
 						diag.dispMaxCm,
 						(unsigned long long)diag.slamSteps,
-						sqrt(ekf.Pt) * 100.0);
+						// EKF covariance is meaningless in override mode, where the EKF
+						// never runs: printing sqrt(1.0) as "100.00cm" implied a wildly
+						// unconverged filter rather than an unused one.
+						fusionMode ? sqrt(ekf.Pt) * 100.0 : 0.0);
 					diag.dispSumCm = 0;
 					diag.dispMaxCm = 0;
 					diag.dispN = 0;
@@ -1250,9 +1356,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					fusion.havePrev = false;
 				}
 
-				if (drift.valid)
-					ApplyDrift(pose);
-
+				ApplyDrift(pose);
 				GatePublish(pose, displayHz, linSpeed);
 				return true;
 			}
@@ -1391,7 +1495,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					return true;
 				}
 
-				if (hmdTracker.slamFallback && drift.valid)
+				if (hmdTracker.slamFallback)
 					++diag.fallbackFrames;
 				if (!hmdTracker.slamFallback) {
 					if (hmdTracker.native) {
@@ -1429,13 +1533,15 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.shouldApplyHeadModel = false;
 					pose.poseTimeOffset = 0;
 				}
-				else if (drift.valid) {
+				else {
 					ApplyDrift(pose);
 				}
 			}
 		}
-		else if (slamSync[openVRID] && drift.valid)
+		else if (slamSync[openVRID])
 		{
+			// ApplyDrift checks validity under driftMutex; an unlocked drift.valid
+			// read here would be a race with the HMD thread writing the correction.
 			ApplyDrift(pose);
 		}
 	}

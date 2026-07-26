@@ -344,7 +344,8 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 
 	// With no usable deltas the cross-covariance is the zero matrix and the SVD below
 	// yields an arbitrary (identity-like) rotation that carries no information. Signal
-	// it rather than returning a confident-looking result; the caller aborts.
+	// it rather than returning a confident-looking result. The NaN propagates through
+	// the solve to the residual, which the `!(rmsError <= 0.1)` gate rejects.
 	if (deltas.empty())
 	{
 		CalCtx.Log("No usable rotation deltas - head movement was too small to solve rotation.\n");
@@ -1222,7 +1223,7 @@ void CalibrationTick(double time)
 			ctx.sampleHint = "Add rotation variety - tilt ear-to-shoulder and look up/down, not just left and right";
 			ctx.sampleHintLevel = 1;
 		}
-		else if (TargetSpread(samples) < 0.20)
+		else if (TargetSpread(samples) < ScaleSpreadThreshold)
 		{
 			// Samples are only taken while you are still, so the motion that works is
 			// move-then-pause rather than continuous walking.

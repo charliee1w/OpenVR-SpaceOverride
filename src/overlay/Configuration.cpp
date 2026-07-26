@@ -400,6 +400,27 @@ static void WriteBackupFile(const std::string &str)
 		out << str;
 }
 
+void RemoveProfile(CalibrationContext &ctx)
+{
+	// Deliberate deletion. SaveProfile refuses to write an invalid profile (so a clean
+	// exit mid-setup cannot wipe a good calibration), which also meant the Remove
+	// button silently did nothing: Clear() invalidates the profile, then SaveProfile
+	// declined to persist it and the old registry value survived the restart. And with
+	// the backup now being read on load, a cleared registry would restore from disk.
+	// Removal therefore has to clear both stores explicitly.
+	ctx.Clear();
+
+	LSTATUS result = RegDeleteKeyValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config");
+	if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND)
+		LogRegistryResult(result);
+
+	std::string backup = BackupFilePath();
+	if (!backup.empty())
+		DeleteFileA(backup.c_str());
+
+	std::cout << "Removed calibration profile (registry + backup)" << std::endl;
+}
+
 void SaveProfile(CalibrationContext &ctx)
 {
 	// Never overwrite a good registry profile with empty/invalid state (e.g. clean exit mid-setup).

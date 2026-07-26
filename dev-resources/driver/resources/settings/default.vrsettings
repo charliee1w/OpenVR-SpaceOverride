@@ -1,5 +1,7 @@
 {
 	"driver_spaceoverride": {
-		"loadPriority": 9999
+		"loadPriority": 9999,
+		"fusionMode": false,
+		"fusionDiag": false
 	}
 }

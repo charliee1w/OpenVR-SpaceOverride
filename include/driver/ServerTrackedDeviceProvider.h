@@ -52,7 +52,10 @@ public:
 private:
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
 		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3], double weight = 1.0);
-	void ApplyDrift(vr::DriverPose_t &pose) const;
+	// Applies the current correction if one is valid; returns whether it did.
+	// Snapshots the correction under driftMutex, since non-HMD pose threads call
+	// this (slamSync) concurrently with the HMD thread writing it.
+	bool ApplyDrift(vr::DriverPose_t &pose);
 
 	double SlamToCorrectedScale() const
 	{
@@ -71,7 +74,13 @@ private:
 	static bool IsFiniteVec3(const double v[3]);
 	static bool IsFiniteQuat(const vr::HmdQuaternion_t &q);
 	// P0-a / P1-a: last published good HMD override pose.
-	void StoreLastGoodHmd(const vr::DriverPose_t &pose);
+	// Always stored in WORLD space so the two modes are directly comparable: override
+	// writes the world pose into vecPosition, while fusion leaves a driver-local
+	// vecPosition plus a worldFromDriver correction. Storing the raw pose fields made
+	// lastGoodHmd mean different things per mode and corrupted the first frames after
+	// a live mode switch.
+	void StoreLastGoodHmd(const vr::HmdQuaternion_t &worldRot, const double worldPos[3],
+		const double velocity[3], const double angularVelocity[3]);
 	bool ApplyLastGoodHmd(vr::DriverPose_t &pose, double maxAgeSec) const;
 	// P0-a: if candidate jumps too far vs last good, hold last good instead.
 	bool ShouldHoldForJump(const double newPos[3], double dtSec) const;
@@ -161,11 +170,17 @@ private:
 	// V2-a: tracker cache crosses pose threads (tracker writes, HMD reads) while both
 	// hold configMutex shared — needs its own lock. Order: configMutex → trackerCacheMutex.
 	std::mutex trackerCacheMutex;
+	// Same problem for the drift correction: the HMD pose thread writes it while other
+	// device threads read it on the slamSync path, both holding configMutex only
+	// *shared*, which does not exclude them from each other.
+	// Order: configMutex → driftMutex.
+	std::mutex driftMutex;
 
 	// V1: currently slewing toward a far candidate (bounded catch-up, HMD thread only).
 	bool reconverging = false;
 
-	// FUSION mode (steamvr.vrsettings driver_spaceoverride/fusionMode, read once at Init):
+	// FUSION mode (steamvr.vrsettings driver_spaceoverride/fusionMode, read at Init and
+	// re-polled in RunFrame so the overlay can switch modes live):
 	// SLAM is the pose source, the tracker only observes the SLAM→lighthouse correction.
 	// LOS loss becomes a non-event; SLAM relocation steps are cancelled same-frame.
 	bool fusionMode = false;
@@ -188,10 +203,11 @@ private:
 		double prevObsPos[3] = { 0, 0, 0 };
 	} fusion;
 
-	// FUSION estimator: error-state Kalman filter on the yaw+translation correction
-	// with online tracker-vs-SLAM time-offset (tau) calibration. Replaces the
-	// One-Euro drift filter in fusion mode; writes its state into `drift` so
-	// ApplyDrift / slamSync / fallback paths stay unchanged. HMD thread only.
+	// FUSION estimator: error-state Kalman filter on the yaw+translation correction.
+	// Replaces the One-Euro drift filter in fusion mode; publishes its state into
+	// `drift` (under driftMutex) so ApplyDrift / slamSync / fallback stay unchanged.
+	// HMD thread only. Tracker-vs-SLAM latency skew is absorbed into motion-inflated
+	// measurement noise, not corrected by a time-offset term — see the note below.
 	struct FusionEkf
 	{
 		bool valid = false;
@@ -207,7 +223,8 @@ private:
 	// innovation gate (tracker glitch / unattributed step). Tracker-vs-SLAM latency
 	// skew is absorbed into the motion-inflated measurement noise, not corrected via
 	// an online time-offset — validated 2026-07-23: at the ~2 mm tracker noise floor
-	// a time-offset estimator has no observable signal (see VFINAL.md).
+	// a time-offset estimator has no observable signal: the post-fit residual is noise,
+	// and tau*velocity is degenerate with the translation state, so it rode noise.
 	bool FusionEkfUpdate(const vr::HmdQuaternion_t &obsRot, const double obsPos[3],
 		const vr::HmdQuaternion_t &rawRot, const double rawPos[3],
 		double linSpeed, double angSpeed);

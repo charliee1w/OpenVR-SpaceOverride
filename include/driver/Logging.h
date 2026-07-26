@@ -19,7 +19,8 @@ const char *GetSessionLogPath();
 void LogSession(const char *fmt, ...);
 
 // Per-frame fusion diagnostic CSV (fusion_diag_<ts>.csv in the logs dir).
-// Opened only when fusionMode && fusionDiag; header written on open.
+// Opened by the driver only while both fusionMode and fusionDiag are set (the CSV
+// only records fusion-path rows); header written on open.
 void OpenDiagCsv();
 void CloseDiagCsv();
 bool DiagCsvOpen();

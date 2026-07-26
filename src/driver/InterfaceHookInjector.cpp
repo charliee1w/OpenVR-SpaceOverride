@@ -36,7 +36,9 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
 		return;
 
-	// GetRawTrackedDevicePoses inside the override can re-enter this detour.
+	// Depth guard against detour re-entry. The original need was a
+	// GetRawTrackedDevicePoses call inside the override (since removed); the guard
+	// stays because any OpenVR call made from this detour could re-enter it.
 	if (g_poseHookDepth > 0)
 	{
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);

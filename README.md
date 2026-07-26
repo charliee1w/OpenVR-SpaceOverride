@@ -56,7 +56,7 @@ Two toggles at the top of the overlay's **Settings** tab:
 | **Fusion mode** | `driver_spaceoverride/fusionMode` | off (override) |
 | **Diagnostic log (CSV)** | `driver_spaceoverride/fusionDiag` | off |
 
-These apply **live — no SteamVR restart and no re-calibration.** The overlay writes them through SteamVR's settings store and the driver re-reads them as it runs, so you can also set them by hand in `steamvr.vrsettings`. Shipped defaults are in `resources/settings/default.vrsettings`, and both default to off, so the driver behaves like upstream unless you ask otherwise.
+These apply **live — no SteamVR restart and no re-calibration.** The overlay writes them through SteamVR's settings store and the driver re-reads them as it runs, so you can also set them by hand in `steamvr.vrsettings`. Shipped defaults are in `dev-resources/driver/resources/settings/default.vrsettings`, and both default to off, so the driver behaves like upstream unless you ask otherwise.
 
 Switching mid-session is safe by construction: whichever estimator takes over starts from a clean state and re-converges, and the publish gate bounds the transition, so the pose slews rather than snapping.
 
@@ -74,7 +74,7 @@ Your calibration is shared by both modes and does not need to be redone when you
 Worth knowing:
 
 - **Turn and tilt, don't just pan.** If every sample looks like the same rotation, calibration will say your movement is too uniform and keep collecting.
-- **Slow beats fast.** Samples taken during fast head rotation are discarded outright: a wireless headset's pose and a lighthouse tracker's pose arrive with different latency, and pairing them mid-whip bakes that skew permanently into the offset. Moving smoothly means fewer rejected samples and a better fit.
+- **Slow beats fast, and samples are only taken while you are still.** Samples captured during fast head rotation *or* fast translation are discarded: a wireless headset's pose and a lighthouse tracker's pose arrive with different latency, so a pair captured mid-motion pairs two instants that are not the same instant, and that skew is baked into the offset. The motion that works is move -> pause -> look around -> repeat; the on-screen coaching says which one is currently blocking.
 - **A bad calibration is refused rather than saved.** If the residual comes out too high, calibration aborts and your previous profile is restored. Re-run at a slower **Calibration Speed**; a rushed pass is the most common cause of a bad result.
 - **Edit Calibration** nudges the saved transform by hand; **Remove Calibration** clears it. Re-calibrating properly beats hand-editing in almost every case.
 
@@ -167,12 +167,12 @@ Relative to upstream, this fork adds:
 
 - **Fusion mode** — an inverted pose path where the headset's SLAM drives the view and the mounted tracker only observes the SLAM→lighthouse correction, estimated by an error-state Kalman filter with innovation gating and covariance-reset re-anchoring, including detection and same-frame cancellation of SLAM relocation steps.
 - **Live mode switching** from the overlay, without a SteamVR restart, with estimator state reset and a bounded transition on switch.
-- **Publish gates** — finite-value checks, and bounded reconvergence so a far-away candidate pose is slewed toward rather than snapped to. The invariant is that the published head pose cannot teleport in a single frame, whatever the inputs do.
+- **Publish gates** — finite-value checks, and bounded reconvergence so a far-away candidate pose is slewed toward rather than snapped to. The gate runs on the composed world pose, so it covers both the tracker-driven pose and the fusion correction; within a mode, and across a live mode switch, the published head pose is rate-limited rather than stepped.
 - **Brief tracker-loss handling** — the last good pose is held for a short window before falling back.
 - **Head tracker quashing** so applications don't bind it as a body joint.
 - **Automatic session logging** with pruning of old session files, plus the optional per-frame diagnostic CSV.
 - **Calibration profile backup** alongside the registry entry.
-- **Calibration sample quality gating** — rejection of samples taken during fast head rotation.
+- **Calibration sample quality gating** — rejection of samples taken during fast head rotation or translation, a spread requirement before headset scale is fitted at all, and live on-screen coaching for the motion the solver still needs.
 - **Cross-thread synchronization** between IPC configuration writes and pose callbacks, so a configuration change cannot tear an in-flight pose.
 - **This README**, rewritten for the fork, correcting upstream statements that fusion mode invalidates.
 
@@ -187,7 +187,7 @@ Relative to upstream, this fork adds:
 | Calibration and sample gating | `src/overlay/Calibration.cpp` |
 | Profile storage and backup | `src/overlay/Configuration.cpp` |
 | Driver/overlay IPC | `include/shared/Protocol.h` |
-| Shipped driver settings | `resources/settings/default.vrsettings` |
+| Shipped driver settings | `dev-resources/driver/resources/settings/default.vrsettings` |
 
 Specific thresholds, filter constants and gate limits are intentionally not restated here — read them from the source above, or from a session log, which always reflects the build you are actually running.
 

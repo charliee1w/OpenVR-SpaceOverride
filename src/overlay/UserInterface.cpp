@@ -152,8 +152,7 @@ void UserInterface::Render(bool runningInOverlay)
 					ImGui::SameLine();
 					if (ImGui::Button("Remove Calibration", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 					{
-						CalCtx.Clear();
-						SaveProfile(CalCtx);
+						RemoveProfile(CalCtx);
 					}
 				}
 
@@ -404,7 +403,8 @@ void UserInterface::Render(bool runningInOverlay)
 					"OFF (Override): your view is built directly from the head tracker. Locks head\n"
 					"and body to the exact same space, but you feel the tracker's jitter and\n"
 					"line-of-sight losses.\n\n"
-					"Switching is safe mid-session - the change is eased in, never snapped.");
+					"Switching mid-session is rate-limited rather than stepped, so the change\n"
+					"eases in over a moment instead of jumping.");
 
 				if (ImGui::Checkbox("Diagnostic log (CSV)", &fusionDiag))
 				{
