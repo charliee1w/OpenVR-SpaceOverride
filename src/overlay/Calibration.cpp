@@ -924,8 +924,9 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
-// V3-e: sample quality gate state (HMD angular speed between sampling ticks).
+// V3-e: sample quality gate state (HMD angular and linear speed between sampling ticks).
 static Eigen::Matrix3d g_prevSampleHmdRot;
+static Eigen::Vector3d g_prevSampleHmdPos = Eigen::Vector3d::Zero();
 static double g_prevSampleTime = 0;
 static bool g_havePrevSample = false;
 
@@ -1154,23 +1155,38 @@ void CalibrationTick(double time)
 		return;
 	}
 
-	// V3-e: drop samples taken during fast head rotation — wireless HMD pose latency vs
-	// lighthouse tracker latency skews paired samples and inflates the residual error.
+	// V3-e: drop samples taken while the head is moving fast. The HMD pose arrives over
+	// a wireless link and the tracker pose over lighthouse, with different latency; a
+	// sample pair captured mid-motion pairs two instants that are not the same instant,
+	// and that skew is baked into the solved offset. Gate BOTH rotation and translation:
+	// covering play space for scale observability requires walking, which is exactly the
+	// linear motion that injects skew, so position must be sampled at the pauses.
 	if (ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
 	{
-		const double kMaxSampleAngSpeed = 1.5; // rad/s
-		Eigen::Matrix3d hmdRot = Pose(ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking).rot;
+		const double kMaxSampleAngSpeed = 1.5;  // rad/s
+		const double kMaxSampleLinSpeed = 0.25; // m/s; at ~4ms skew this is <1mm of error
+		Pose hmdPose(ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
 		double dt = time - g_prevSampleTime;
-		bool tooFast = g_havePrevSample && dt > 1e-4
-			&& AngularSpeedBetween(hmdRot, g_prevSampleHmdRot, dt) > kMaxSampleAngSpeed;
-		g_prevSampleHmdRot = hmdRot;
+
+		bool tooFastAng = false, tooFastLin = false;
+		if (g_havePrevSample && dt > 1e-4)
+		{
+			tooFastAng = AngularSpeedBetween(hmdPose.rot, g_prevSampleHmdRot, dt) > kMaxSampleAngSpeed;
+			tooFastLin = ((hmdPose.trans - g_prevSampleHmdPos).norm() / dt) > kMaxSampleLinSpeed;
+		}
+
+		g_prevSampleHmdRot = hmdPose.rot;
+		g_prevSampleHmdPos = hmdPose.trans;
 		g_prevSampleTime = time;
 		g_havePrevSample = true;
-		if (tooFast)
+
+		if (tooFastAng || tooFastLin)
 		{
 			// This is why the bar can stall with no explanation: samples are being
 			// dropped. Tell the user, and hold the message briefly so it is readable.
-			ctx.sampleHint = "Slow down - moving too fast, samples are being skipped";
+			ctx.sampleHint = tooFastLin
+				? "Hold still where you are - samples are only taken when you pause"
+				: "Turn your head more slowly - samples are being skipped";
 			ctx.sampleHintLevel = 2;
 			g_lastFastDropTime = time;
 			return;
@@ -1208,7 +1224,9 @@ void CalibrationTick(double time)
 		}
 		else if (TargetSpread(samples) < 0.20)
 		{
-			ctx.sampleHint = "Step around and crouch - cover more of your play space to lock in scale";
+			// Samples are only taken while you are still, so the motion that works is
+			// move-then-pause rather than continuous walking.
+			ctx.sampleHint = "Move to a different spot or height, pause, then look around - repeat to lock in scale";
 			ctx.sampleHintLevel = 1;
 		}
 		else
