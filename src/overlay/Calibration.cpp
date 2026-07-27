@@ -29,6 +29,31 @@ CalibrationContext CalCtx;
 // past calibration's quality could not be reviewed afterwards - which is exactly
 // what you need when repeat calibrations disagree. Append a one-line record per
 // completed calibration next to the driver's session logs.
+// Solver internals recorded for the calibration log. These are statics rather than
+// parameters because they are produced deep inside the solve and are only ever read
+// back out here; threading them through every call site would add noise without
+// adding information.
+//
+// g_lastScaleSource is the single most useful field: it distinguishes a scale that
+// was actually measured from one that was carried over or defaulted, which the value
+// alone cannot show (a kept 0.996 and a measured 0.996 look identical).
+static double g_lastScaleStdErr = -1.0;
+static const char *g_lastScaleSource = "unknown";
+static double g_lastAxisVariance = 0.0;
+static size_t g_lastSampleTarget = 0;
+static bool g_lastEarlyFinish = false;
+
+// Deviation of a calibrated pitch/roll from the flat +/-180 degree convention flip
+// between the two spaces. Both spaces are gravity-levelled, so the true relative
+// rotation has yaw as its only free degree of freedom and this deviation should be
+// ~0; whatever it actually is, is tilt -- either solver noise or a genuinely
+// un-level room setup. Logging it is what tells the two apart across runs.
+static double TiltFromFlip(double angleDeg)
+{
+	double dev = 180.0 - std::fabs(angleDeg);
+	return std::fabs(dev);
+}
+
 static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM,
 	int accepted, int rejAng, int rejLin, int coverageCells)
 {
@@ -64,9 +89,27 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		// many distinct 10cm cells the accepted samples occupy. Many samples in few
 		// cells = clumped, which the RMS residual alone cannot reveal.
 		<< "  accepted=" << accepted
+		<< "  target=" << g_lastSampleTarget
+		<< "  early=" << (g_lastEarlyFinish ? 1 : 0)
 		<< "  rej_ang=" << rejAng
 		<< "  rej_lin=" << rejLin
 		<< "  cells=" << coverageCells
+		// Where hmdScale came from, and how well determined it was. "measured" is the
+		// only value that reflects this run; "kept_*" means the run could not observe
+		// scale and the previous measurement was carried over.
+		<< "  scale_src=" << g_lastScaleSource
+		<< "  scale_stderr_pct=" << std::setprecision(3)
+		<< (g_lastScaleStdErr >= 0.0 ? g_lastScaleStdErr * 100.0 : -1.0)
+		// Solved rotation, plus the pitch/roll tilt away from the expected flip. If
+		// tilt_* scatters run to run it is solver noise (and worth constraining); if it
+		// repeats, it is a real tilt between the two spaces and must be kept.
+		<< "  yaw=" << std::setprecision(2) << ctx.calibratedRotation(1)
+		<< "  pitch=" << ctx.calibratedRotation(2)
+		<< "  roll=" << ctx.calibratedRotation(0)
+		<< "  tilt_pitch=" << TiltFromFlip(ctx.calibratedRotation(2))
+		<< "  tilt_roll=" << TiltFromFlip(ctx.calibratedRotation(0))
+		<< "  axis_var=" << std::setprecision(6) << g_lastAxisVariance
+		<< "  hmd=" << ctx.hmdSerial
 		<< "  tracker=" << ctx.trackerSerial
 		<< "\n";
 }
@@ -463,7 +506,7 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 // it is the quantity that determines whether scale was observable at all.
 static double g_lastScaleSpread = 0.0;
 
-static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
+static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale, double priorScale)
 {
 	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
 	for (auto &sample : samples)
@@ -479,12 +522,21 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
-		snprintf(buf, sizeof buf,
-			"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m), assuming 1.\n"
-			"Walk and crouch to cover more of your play space while calibrating; head rotation alone cannot determine scale.\n",
-			spread, ScaleSpreadThreshold);
+		if (priorScale != 1.0)
+			snprintf(buf, sizeof buf,
+				"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m).\n"
+				"Keeping your previously measured headset scale %.5f (%+.2f%%). To re-measure it, walk and\n"
+				"crouch to cover more of your play space; head rotation alone cannot determine scale.\n",
+				spread, ScaleSpreadThreshold, priorScale, (priorScale - 1.0) * 100.0);
+		else
+			snprintf(buf, sizeof buf,
+				"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m), assuming 1.\n"
+				"Walk and crouch to cover more of your play space while calibrating; head rotation alone cannot determine scale.\n",
+				spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
-		return 1.0;
+		g_lastScaleSource = (priorScale != 1.0) ? "kept_low_spread" : "default_low_spread";
+		g_lastScaleStdErr = -1.0;
+		return priorScale;
 	}
 
 	Eigen::MatrixXd coefficients(samples.size() * 3, 7);
@@ -531,26 +583,41 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 			scaleStdErr = std::sqrt(sigma2 * cov00);
 	}
 
+	g_lastScaleStdErr = scaleStdErr;
+
 	if (!(scaleStdErr <= MaxScaleStdErr))
 	{
-		snprintf(buf, sizeof buf,
-			"Headset scale is not determined by this calibration (fit %.5f +/- %.2f%%, positional spread %.2f m) - assuming 1.\n"
-			"To measure scale, walk around and cover more of your play space while calibrating; head rotation alone is not enough.\n",
-			fittedScale, scaleStdErr * 100.0, spread);
+		g_lastScaleSource = (priorScale != 1.0) ? "kept_weak_fit" : "default_weak_fit";
+		if (priorScale != 1.0)
+			snprintf(buf, sizeof buf,
+				"Headset scale is not determined by this calibration (fit %.5f +/- %.2f%%, positional spread %.2f m).\n"
+				"Keeping your previously measured headset scale %.5f. To re-measure it, walk around and cover\n"
+				"more of your play space while calibrating; head rotation alone is not enough.\n",
+				fittedScale, scaleStdErr * 100.0, spread, priorScale);
+		else
+			snprintf(buf, sizeof buf,
+				"Headset scale is not determined by this calibration (fit %.5f +/- %.2f%%, positional spread %.2f m) - assuming 1.\n"
+				"To measure scale, walk around and cover more of your play space while calibrating; head rotation alone is not enough.\n",
+				fittedScale, scaleStdErr * 100.0, spread);
 		CalCtx.Log(buf);
-		return 1.0;
+		return priorScale;
 	}
 
 	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
-		snprintf(buf, sizeof buf, "Fitted space scale %.5f is not plausible, assuming headset scale 1\n", fittedScale);
+		g_lastScaleSource = (priorScale != 1.0) ? "kept_implausible" : "default_implausible";
+		if (priorScale != 1.0)
+			snprintf(buf, sizeof buf, "Fitted space scale %.5f is not plausible; keeping previous headset scale %.5f\n", fittedScale, priorScale);
+		else
+			snprintf(buf, sizeof buf, "Fitted space scale %.5f is not plausible, assuming headset scale 1\n", fittedScale);
 		CalCtx.Log(buf);
-		return 1.0;
+		return priorScale;
 	}
 
 	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%, +/- %.2f%%), implied absolute headset scale: %.5f\n",
 		fittedScale, (fittedScale - 1.0) * 100.0, scaleStdErr * 100.0, fittedScale / targetModelScale);
 	CalCtx.Log(buf);
+	g_lastScaleSource = "measured";
 	return fittedScale;
 }
 
@@ -1006,6 +1073,11 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_lastFastDropTime = 0;
 	g_rejAngCount = 0;
 	g_rejLinCount = 0;
+	// Per-run solver telemetry; stale values would otherwise be attributed to this run.
+	g_lastEarlyFinish = false;
+	g_lastScaleSource = "unknown";
+	g_lastScaleStdErr = -1.0;
+	g_lastAxisVariance = 0.0;
 	ctx.sampleHint = "Move your head slowly through different angles";
 	ctx.sampleHintLevel = 1;
 	ctx.Log("Starting calibration...\n");
@@ -1274,11 +1346,37 @@ void CalibrationTick(double time)
 		}
 	}
 
-	if (samples.size() >= CalCtx.SampleCount())
+	// Stop as soon as the data is actually good enough to solve, instead of always
+	// grinding out the full sample count. Samples are only taken while nearly still,
+	// so standing in one spot piles up near-identical samples that advance the counter
+	// without adding information -- while the walking that scale observability needs
+	// collects nothing. The count is therefore a poor completion test: what matters is
+	// rotation variety (conditions the rotation solve) and positional spread (makes
+	// scale observable). When both are already satisfied, more samples buy nothing and
+	// only make calibration feel like it stalls. If they are NOT satisfied, this changes
+	// nothing -- collection continues to the full count exactly as before.
+	const size_t sampleTarget = CalCtx.SampleCount();
+	g_lastSampleTarget = sampleTarget;
+	bool readyToSolve = samples.size() >= sampleTarget;
+	if (!readyToSolve && samples.size() >= sampleTarget / 3
+		&& SecondAxisVariance(samples) >= AxisVarianceThreshold * 2.0
+		&& TargetSpread(samples) >= ScaleSpreadThreshold)
+	{
+		char early[192];
+		snprintf(early, sizeof early,
+			"Coverage already good (%zu samples, spread %.2f m) - solving now instead of collecting %zu.\n",
+			samples.size(), TargetSpread(samples), sampleTarget);
+		CalCtx.Log(early);
+		readyToSolve = true;
+		g_lastEarlyFinish = true;
+	}
+
+	if (readyToSolve)
 	{
 		CalCtx.Log("\n");
 
 		double axisVariance = SecondAxisVariance(samples);
+		g_lastAxisVariance = axisVariance;
 		if (axisVariance < AxisVarianceThreshold)
 		{
 			if (++coplanarRetries >= 10)
@@ -1308,7 +1406,13 @@ void CalibrationTick(double time)
 		ctx.calibratedScale = calScale;
 		ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
 
-		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
+		// Scale is the one calibrated quantity the runtime cannot re-estimate while playing
+		// (fusion applies hmdScale directly; the EKF carries yaw+translation state, no scale).
+		// If this run lacks the positional spread to observe scale, keep the previously measured
+		// value rather than destroying it with a hard 1.0 -- StartCalibration does not reset
+		// ctx.hmdScale, so it still holds the last persisted scale at this point.
+		const double priorHmdScale = ctx.hmdScale;
+		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale, priorHmdScale);
 
 		for (auto &sample : samples)
 			sample.ref.trans /= ctx.hmdScale;
