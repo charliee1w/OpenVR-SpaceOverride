@@ -11,6 +11,9 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <algorithm>
+#include <ctime>
+#include <vector>
 
 static picojson::array FloatArray(const float *buf, int numFloats)
 {
@@ -69,7 +72,7 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["targetModelScale"].is<double>())
 		ctx.targetModelScale = obj["targetModelScale"].get<double>();
 	else
-		ctx.targetModelScale = ctx.calibratedScale;
+		ctx.targetModelScale = 1.0;
 
 	if (obj["hmdScale"].is<double>())
 		ctx.hmdScale = obj["hmdScale"].get<double>();
@@ -185,6 +188,11 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["scale"].set<double>(ctx.calibratedScale);
 	profile["targetModelScale"].set<double>(ctx.targetModelScale);
 	profile["hmdScale"].set<double>(ctx.hmdScale);
+	// Save time, so LoadProfile can tell which store holds the newer calibration when
+	// the two disagree. Written as a plain unix timestamp; absent in legacy profiles,
+	// which are then treated as older than anything carrying a stamp.
+	double savedAt = (double) std::time(nullptr);
+	profile["savedAt"].set<double>(savedAt);
 
 	profile["native"].set<bool>(ctx.enableNative);
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
@@ -284,14 +292,19 @@ static std::string ReadRegistryKey()
 	return str;
 }
 
-static void WriteRegistryKey(std::string str)
+// Returns whether the value is actually readable back as written. A registry write
+// that fails leaves the previous profile in place, and the old code reported that
+// only to stderr (invisible for a windowed app) while still writing the backup file
+// -- so the two stores could silently drift apart and the next launch would load the
+// stale one, reverting the user's calibration.
+static bool WriteRegistryKey(std::string str)
 {
 	HKEY hkey;
 	auto result = RegCreateKeyExA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, 0, REG_NONE, 0, KEY_ALL_ACCESS, 0, &hkey, 0);
 	if (result != ERROR_SUCCESS)
 	{
 		LogRegistryResult(result);
-		return;
+		return false;
 	}
 
 	DWORD size = str.size() + 1;
@@ -301,6 +314,34 @@ static void WriteRegistryKey(std::string str)
 		LogRegistryResult(result);
 
 	RegCloseKey(hkey);
+
+	if (result != ERROR_SUCCESS)
+		return false;
+
+	return ReadRegistryKey() == str;
+}
+
+// Save timestamp of a serialized profile, or -1 when it is missing/unparseable and
+// 0 when it parses but predates the stamp (legacy profile).
+static double ProfileSavedAt(const std::string &str)
+{
+	if (str.empty())
+		return -1.0;
+
+	picojson::value v;
+	std::stringstream io(str);
+	if (!picojson::parse(v, io).empty() || !v.is<picojson::array>())
+		return -1.0;
+
+	auto &arr = v.get<picojson::array>();
+	if (arr.empty() || !arr[0].is<picojson::object>())
+		return -1.0;
+
+	auto obj = arr[0].get<picojson::object>();
+	if (obj["savedAt"].is<double>())
+		return obj["savedAt"].get<double>();
+
+	return 0.0;
 }
 
 static std::string BackupFilePath()
@@ -331,57 +372,67 @@ void LoadProfile(CalibrationContext &ctx)
 {
 	ctx.validProfile = false;
 
-	// The backup exists so a lost or unparseable registry profile is actually
-	// recoverable; it was previously written but never read, so it recovered nothing.
-	// Try the registry first, then fall back to the on-disk mirror.
-	auto str = ReadRegistryKey();
-	bool fromBackup = false;
-	if (str == "")
+	// SaveProfile writes the registry and the on-disk mirror from one string, so they
+	// normally agree. If one write silently fails they drift apart, and always
+	// preferring the registry then loads a stale calibration -- observed in the wild
+	// with the two stores holding calibrations ~92 degrees apart in yaw, which presents
+	// as "my calibration reverted on its own". Load whichever store was saved most
+	// recently instead of a fixed priority, and fall through to the other if the newer
+	// one does not parse.
+	const std::string reg = ReadRegistryKey();
+	const std::string bak = ReadBackupFile();
+
+	struct Candidate
 	{
-		str = ReadBackupFile();
-		fromBackup = !str.empty();
-		if (!fromBackup)
+		const std::string *str;
+		const char *name;
+		double savedAt;
+	};
+
+	std::vector<Candidate> candidates;
+	if (!reg.empty())
+		candidates.push_back({ &reg, "registry", ProfileSavedAt(reg) });
+	if (!bak.empty())
+		candidates.push_back({ &bak, "profile-backup.json", ProfileSavedAt(bak) });
+
+	if (candidates.empty())
+	{
+		std::cout << "Profile is empty" << std::endl;
+		ctx.Clear();
+		return;
+	}
+
+	// Newest first. stable_sort keeps the registry ahead of the backup on a tie, so
+	// the ordinary case (both stores identical) behaves exactly as before.
+	std::stable_sort(candidates.begin(), candidates.end(),
+		[](const Candidate &a, const Candidate &b) { return a.savedAt > b.savedAt; });
+
+	for (const auto &candidate : candidates)
+	{
+		try
 		{
-			std::cout << "Profile is empty" << std::endl;
-			ctx.Clear();
+			std::stringstream io(*candidate.str);
+			ParseProfile(ctx, io);
+			std::cout << "Loaded profile from " << candidate.name << std::endl;
+
+			// Re-sync the stores whenever they disagree, so the divergence does not
+			// persist and the next launch is not a coin flip.
+			if (reg != bak)
+			{
+				std::cout << "Profile stores disagreed; rewriting both from "
+					<< candidate.name << std::endl;
+				SaveProfile(ctx);
+			}
 			return;
 		}
-		std::cout << "Registry profile missing, restoring from profile-backup.json" << std::endl;
-	}
-
-	try
-	{
-		std::stringstream io(str);
-		ParseProfile(ctx, io);
-		std::cout << (fromBackup ? "Loaded profile from backup" : "Loaded profile") << std::endl;
-		if (fromBackup)
-			SaveProfile(ctx); // re-seed the registry so the recovery is durable
-	}
-	catch (const std::runtime_error &e)
-	{
-		std::cerr << "Error loading profile: " << e.what() << std::endl;
-
-		if (!fromBackup)
+		catch (const std::runtime_error &e)
 		{
-			// Registry content was present but unparseable - try the mirror before
-			// giving up and leaving the user with no calibration.
-			std::string backup = ReadBackupFile();
-			if (!backup.empty())
-			{
-				try
-				{
-					std::stringstream io2(backup);
-					ParseProfile(ctx, io2);
-					std::cout << "Recovered profile from profile-backup.json" << std::endl;
-					SaveProfile(ctx);
-				}
-				catch (const std::runtime_error &e2)
-				{
-					std::cerr << "Backup profile also failed to load: " << e2.what() << std::endl;
-				}
-			}
+			std::cerr << "Error loading profile from " << candidate.name << ": " << e.what() << std::endl;
 		}
 	}
+
+	std::cerr << "No usable profile found in registry or backup" << std::endl;
+	ctx.Clear();
 }
 
 // V3-b: mirror the profile to a plain file so a lost registry key is recoverable.
@@ -430,10 +481,22 @@ void SaveProfile(CalibrationContext &ctx)
 		return;
 	}
 
-	std::cout << "Saving profile to registry" << std::endl;
-
 	std::stringstream io;
 	WriteProfile(ctx, io);
-	WriteRegistryKey(io.str());
-	WriteBackupFile(io.str());
+	const std::string str = io.str();
+
+	const bool registryOk = WriteRegistryKey(str);
+	WriteBackupFile(str);
+
+	if (registryOk)
+	{
+		std::cout << "Saved profile (registry + backup)" << std::endl;
+	}
+	else
+	{
+		// Not fatal: the mirror carries the newer save timestamp, so LoadProfile will
+		// prefer it on the next launch rather than silently reverting the calibration.
+		std::cerr << "WARNING: registry profile write did not verify - "
+			<< "profile-backup.json holds the current calibration" << std::endl;
+	}
 }
