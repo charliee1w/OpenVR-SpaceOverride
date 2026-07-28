@@ -441,7 +441,21 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 // 0.235-0.286 m all landed within 0.5% of each other, while one at 0.160 m fitted
 // a scale ~3% off. Matches the live coach's threshold, so "cover more space" and
 // "scale accepted" agree. Below this, scale falls back to exactly 1.
-static const double ScaleSpreadThreshold = 0.20;
+// Lowered from 0.20. That figure was set from calibrations taken before samples were
+// gated on linear speed, when a 0.160 m run fitted a scale ~3% off; with the speed
+// gates in place -- and now permitting samples while actually walking -- low-spread
+// fits are far better behaved, and 0.20 was rejecting scale on runs that a real user
+// can realistically produce. The residual risk of a badly conditioned fit at low
+// spread is handled by LowSpreadMaxDeviation below rather than by refusing to look.
+static const double ScaleSpreadThreshold = 0.15;
+// Above this spread the fit is trusted on its own merits; between the two the fit is
+// only accepted if it stays close to unity (see LowSpreadMaxDeviation).
+static const double ScaleConfidentSpread = 0.20;
+// Real headset-to-lighthouse scale sits within a fraction of a percent of 1. A
+// low-spread fit claiming more than this is ill-conditioning, not a discovery -- it is
+// exactly the shape of the historical 0.966 outlier, which the formal standard error
+// failed to catch. Plausibility, not precision, is what filters that case.
+static const double LowSpreadMaxDeviation = 0.02;
 static const double MinCalibratedScale = 0.9;
 static const double MaxCalibratedScale = 1.1;
 // Secondary guard for the case where spread is adequate but residuals are noisy.
@@ -449,7 +463,12 @@ static const double MaxCalibratedScale = 1.1;
 // ill-conditioning bias that dominates at low spread -- it reported 0.2% on the
 // 0.160 m fit that was actually ~3% wrong -- which is why the spread gate above,
 // not this, is the primary check.
-static const double MaxScaleStdErr = 0.005;
+// Relaxed from 0.005: at the lower spread now permitted the formal standard error
+// naturally rises, and holding it at 0.5% would reject those fits before the
+// plausibility check below ever saw them. It was never the effective filter anyway --
+// it reported 0.2% on the 0.160 m fit that was ~3% wrong -- so it serves as a coarse
+// sanity bound while LowSpreadMaxDeviation does the real work.
+static const double MaxScaleStdErr = 0.012;
 
 Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const Eigen::Matrix3d& rotation, double scale)
 {
@@ -616,8 +635,23 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 
 	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%, +/- %.2f%%), implied absolute headset scale: %.5f\n",
 		fittedScale, (fittedScale - 1.0) * 100.0, scaleStdErr * 100.0, fittedScale / targetModelScale);
+	// Low-spread band: the fit is usable but weakly conditioned, so accept it only if it
+	// is close to unity. A real headset scale never strays far from 1; a large excursion
+	// here is the estimator failing, and in fusion mode a wrong scale cannot be undone
+	// at runtime, so the prior is the safer answer.
+	if (spread < ScaleConfidentSpread && std::fabs(fittedScale - 1.0) > LowSpreadMaxDeviation)
+	{
+		snprintf(buf, sizeof buf,
+			"Fitted scale %.5f (%+.2f%%) is too far from 1 to trust at spread %.2f m - keeping %.5f.\n"
+			"Cover more of your play space to measure a scale this different.\n",
+			fittedScale, (fittedScale - 1.0) * 100.0, spread, priorScale);
+		CalCtx.Log(buf);
+		g_lastScaleSource = (priorScale != 1.0) ? "kept_lowspread_outlier" : "default_lowspread_outlier";
+		return priorScale;
+	}
+
 	CalCtx.Log(buf);
-	g_lastScaleSource = "measured";
+	g_lastScaleSource = (spread < ScaleConfidentSpread) ? "measured_lowspread" : "measured";
 	return fittedScale;
 }
 
@@ -1270,8 +1304,17 @@ void CalibrationTick(double time)
 	// linear motion that injects skew, so position must be sampled at the pauses.
 	if (ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
 	{
-		const double kMaxSampleAngSpeed = 1.5;  // rad/s
-		const double kMaxSampleLinSpeed = 0.25; // m/s; at ~4ms skew this is <1mm of error
+		// Relaxed from 1.5 / 0.25. The old linear limit rejected anything faster than a
+		// shuffle, so repositioning around the room collected nothing and the bar
+		// appeared to stall every time the user did the one thing scale needs. What the
+		// gate is really bounding is v * (tracker-vs-HMD latency skew) baked into the
+		// solved offset -- and in fusion mode the EKF re-anchors translation
+		// continuously at runtime, so that particular error is absorbed rather than
+		// permanent. Trading a few mm of translation skew for samples collected while
+		// actually moving is the right side of that bargain: it is what makes adequate
+		// positional spread reachable at all.
+		const double kMaxSampleAngSpeed = 2.0;  // rad/s
+		const double kMaxSampleLinSpeed = 0.35; // m/s; a slow walk, not a shuffle
 		Pose hmdPose(ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking);
 		double dt = time - g_prevSampleTime;
 

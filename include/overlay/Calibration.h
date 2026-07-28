@@ -104,18 +104,24 @@ struct CalibrationContext
 		continuousSync = true;
 	}
 
+	// Sample targets. These used to be 100/250/500, which was far more than the solve
+	// needs: samples are only taken while nearly still, so a head turning in one spot
+	// produces hundreds of near-duplicates that add no information. The cost was paid
+	// in user patience -- and worse, the time spent standing still grinding out the
+	// count is time not spent covering the play space, which is the one thing scale
+	// observability actually requires. Halving them buys back that time.
 	size_t SampleCount()
 	{
 		switch (calibrationSpeed)
 		{
 		case FAST:
-			return 100;
+			return 60;
 		case SLOW:
-			return 250;
+			return 140;
 		case VERY_SLOW:
-			return 500;
+			return 250;
 		}
-		return 100;
+		return 60;
 	}
 
 	struct Message
