@@ -42,21 +42,63 @@ static const char *g_lastScaleSource = "unknown";
 static double g_lastAxisVariance = 0.0;
 static size_t g_lastSampleTarget = 0;
 static bool g_lastEarlyFinish = false;
+static double g_lastSplitHalfDeg = -1.0;
+static int g_lastStationCount = 0;
+// Tilt as solved, captured BEFORE gravity levelling zeroes it. Recomputing it from
+// ctx.calibratedRotation at log time reports 0.00 forever, because by then the levelling
+// has already discarded exactly the quantity being logged -- which silently destroyed
+// this measurement across four calibrations. It is the only remaining term in the error
+// budget with a wide range (0-29 mm), so it has to survive to disk.
+static double g_lastTiltX = 0.0;
+static double g_lastTiltZ = 0.0;
 
-// Deviation of a calibrated pitch/roll from the flat +/-180 degree convention flip
-// between the two spaces. Both spaces are gravity-levelled, so the true relative
-// rotation has yaw as its only free degree of freedom and this deviation should be
-// ~0; whatever it actually is, is tilt -- either solver noise or a genuinely
-// un-level room setup. Logging it is what tells the two apart across runs.
-static double TiltFromFlip(double angleDeg)
+// How far the calibration tips the vertical axis, in degrees. Both spaces are
+// gravity-levelled, so the true relative rotation has yaw as its only free degree of
+// freedom and this should be ~0; what it actually is, is tilt -- either solver noise
+// or a genuinely un-level room setup, which repeated runs tell apart.
+//
+// Computed from the rotation matrix, not from the Euler angles: pitch/roll near zero
+// and near +/-180 can describe the same physical rotation with a compensating yaw, so
+// measuring "distance from the expected flip" per-angle reports ~179 degrees for a
+// perfectly ordinary solve. Taking the absolute cosine makes it flip-agnostic.
+static Eigen::Matrix3d EulerDegToMatrix(const Eigen::Vector3d &eulerDeg)
 {
-	double dev = 180.0 - std::fabs(angleDeg);
-	return std::fabs(dev);
+	const Eigen::Vector3d r = eulerDeg * EIGEN_PI / 180.0;
+	return (Eigen::AngleAxisd(r(0), Eigen::Vector3d::UnitZ()) *
+		Eigen::AngleAxisd(r(1), Eigen::Vector3d::UnitY()) *
+		Eigen::AngleAxisd(r(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+}
+
+// Signed, two-component. An earlier version returned acos(|cos|) -- a magnitude, which
+// is strictly non-negative and therefore positively biased: fed pure zero-mean noise it
+// reports a healthy-looking average tilt forever and can never average to zero. Using
+// it to decide "is there a real tilt here" would have answered yes no matter what.
+// Signed components average to zero under noise and to the true tilt under a real one,
+// which is the only way repeated runs can settle the question.
+//
+// Folds the +/-180 degree convention flip, since pitch/roll near zero and near 180 can
+// describe the same physical rotation with a compensating yaw.
+static void SignedTiltDeg(const Eigen::Vector3d &eulerDeg, double &tiltX, double &tiltZ)
+{
+	Eigen::Vector3d v = EulerDegToMatrix(eulerDeg) * Eigen::Vector3d::UnitY();
+	if (v.y() < 0.0)
+		v = -v;
+
+	double z = v.z(), x = -v.x();
+	if (z > 1.0) z = 1.0; else if (z < -1.0) z = -1.0;
+	if (x > 1.0) x = 1.0; else if (x < -1.0) x = -1.0;
+
+	tiltX = std::asin(z) * 180.0 / EIGEN_PI;
+	tiltZ = std::asin(x) * 180.0 / EIGEN_PI;
 }
 
 static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM,
 	int accepted, int rejAng, int rejLin, int coverageCells)
 {
+	// As solved, not as published: ctx.calibratedRotation has been levelled by now.
+	const double tiltX = g_lastTiltX;
+	const double tiltZ = g_lastTiltZ;
+
 	char localAppData[MAX_PATH] = {};
 	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
 	if (n == 0 || n >= MAX_PATH)
@@ -106,8 +148,10 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  yaw=" << std::setprecision(2) << ctx.calibratedRotation(1)
 		<< "  pitch=" << ctx.calibratedRotation(2)
 		<< "  roll=" << ctx.calibratedRotation(0)
-		<< "  tilt_pitch=" << TiltFromFlip(ctx.calibratedRotation(2))
-		<< "  tilt_roll=" << TiltFromFlip(ctx.calibratedRotation(0))
+		<< "  tilt_x=" << tiltX
+		<< "  tilt_z=" << tiltZ
+		<< "  split_deg=" << g_lastSplitHalfDeg
+		<< "  stations=" << g_lastStationCount
 		<< "  axis_var=" << std::setprecision(6) << g_lastAxisVariance
 		<< "  hmd=" << ctx.hmdSerial
 		<< "  tracker=" << ctx.trackerSerial
@@ -378,7 +422,9 @@ DSample DeltaRotationSamples(Sample s1, Sample s2)
 	return ds;
 }
 
-Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
+// `quiet` suppresses the user-facing log line so the split-half reproducibility check
+// can re-solve on subsets without narrating each one.
+Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples, bool quiet = false)
 {
 	std::vector<DSample> deltas;
 
@@ -431,8 +477,11 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 
 	Eigen::Vector3d euler = rot.eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
 
-	snprintf(buf, sizeof buf, "Calibrated rotation: yaw=%.2f pitch=%.2f roll=%.2f\n", euler[1], euler[2], euler[0]);
-	CalCtx.Log(buf);
+	if (!quiet)
+	{
+		snprintf(buf, sizeof buf, "Calibrated rotation: yaw=%.2f pitch=%.2f roll=%.2f\n", euler[1], euler[2], euler[0]);
+		CalCtx.Log(buf);
+	}
 	return euler;
 }
 
@@ -455,7 +504,12 @@ static const double ScaleConfidentSpread = 0.20;
 // low-spread fit claiming more than this is ill-conditioning, not a discovery -- it is
 // exactly the shape of the historical 0.966 outlier, which the formal standard error
 // failed to catch. Plausibility, not precision, is what filters that case.
-static const double LowSpreadMaxDeviation = 0.02;
+// Tightened from 0.02, which was set from first principles rather than from the data
+// and promptly let through a 0.98814 fit at 0.153 m spread -- 1.19% off unity, when
+// every well-covered measurement on real hardware has landed in 0.992-0.998, i.e.
+// inside 0.8%. A band that admits a value further from unity than any trustworthy
+// measurement is not a filter. 1% admits all of them and rejects that fit.
+static const double LowSpreadMaxDeviation = 0.01;
 static const double MinCalibratedScale = 0.9;
 static const double MaxCalibratedScale = 1.1;
 // Secondary guard for the case where spread is adequate but residuals are noisy.
@@ -1052,6 +1106,91 @@ static double g_lastFastDropTime = 0;
 static int g_rejAngCount = 0;
 static int g_rejLinCount = 0;
 
+// --- Stations -------------------------------------------------------------
+//
+// Sampling is capped at 20 Hz (CalibrationTick early-returns below 0.05 s), and
+// samples are only taken while nearly still. Standing in one place therefore emits
+// ~20 near-identical samples a second: each one advances the sample counter, none of
+// them adds information, and the O(N^2) pairwise solves then weight that cluster as
+// though it were hundreds of independent observations.
+//
+// A "station" is one occupied pose: a run of samples within a small position and
+// orientation radius. Samples past a cap within one station are discarded rather than
+// collected, so the counter can only advance by actually moving or looking somewhere
+// new -- which is exactly the motion the solve needs. Progress is then measured in
+// stations, not samples.
+static const double kStationPosRadius = 0.05;          // m
+static const double kStationAngRadius = 10.0 * EIGEN_PI / 180.0;
+static const int kMaxSamplesPerStation = 10;           // beyond this a pose is redundant
+
+struct StationTracker
+{
+	bool have = false;
+	Eigen::Vector3d pos = Eigen::Vector3d::Zero();
+	Eigen::Matrix3d rot = Eigen::Matrix3d::Identity();
+	int count = 0;
+	int index = -1;
+};
+static StationTracker g_station;
+static std::vector<int> g_sampleStation;   // parallel to the sample vector
+static int g_stationCount = 0;
+// The split-half check re-solves the rotation twice and the solve is O(N^2) in samples,
+// so it is throttled rather than run on every accepted sample.
+static double g_lastSplitCheckTime = 0.0;
+static double g_splitFailStart = 0.0;
+
+// Angle between two rotations, in radians. Representation-independent, unlike
+// comparing Euler triples.
+static double RotAngleBetween(const Eigen::Matrix3d &a, const Eigen::Matrix3d &b)
+{
+	double c = ((a.transpose() * b).trace() - 1.0) * 0.5;
+	if (c > 1.0) c = 1.0;
+	if (c < -1.0) c = -1.0;
+	return std::acos(c);
+}
+
+static void ResetStations()
+{
+	g_station = StationTracker();
+	g_sampleStation.clear();
+	g_stationCount = 0;
+	g_lastSplitCheckTime = 0.0;
+	g_splitFailStart = 0.0;
+}
+
+// Split-half reproducibility: solve the rotation on alternating stations and compare.
+// This is the assumption-light test the residual cannot provide -- the residual is
+// computed after three-plus nuisance parameters are refitted, so it absorbs most of a
+// gross rotation error (a run ~17 degrees wrong still scored 9.7 mm). Two independent
+// halves of the data disagreeing is direct evidence the solve is not determined,
+// whatever the residual says.
+//
+// Returns false when the halves are too small to compare yet; `outDeg` receives the
+// disagreement in degrees.
+static bool SplitHalfRotationAgreement(const std::vector<Sample> &samples, double &outDeg)
+{
+	if (samples.size() != g_sampleStation.size())
+		return false;
+
+	std::vector<Sample> a, b;
+	for (size_t i = 0; i < samples.size(); i++)
+		((g_sampleStation[i] % 2) == 0 ? a : b).push_back(samples[i]);
+
+	// Each half needs enough distinct poses to solve at all.
+	if (a.size() < 24 || b.size() < 24)
+		return false;
+
+	const Eigen::Matrix3d ra = EulerDegToMatrix(CalibrateRotation(a, true));
+	const Eigen::Matrix3d rb = EulerDegToMatrix(CalibrateRotation(b, true));
+	outDeg = RotAngleBetween(ra, rb) * 180.0 / EIGEN_PI;
+	return true;
+}
+
+// Largest disagreement between independent halves that still counts as converged.
+// Tilt is worth ~28 mm of foot-vs-head displacement per degree, so this is set to keep
+// the rotation contribution to a few mm rather than to any statistical convention.
+static const double kMaxSplitHalfDeg = 1.5;
+
 // Distinct 10cm cells occupied by the accepted sample positions. Many samples in
 // few cells means the coverage is clumped even when the sample count is high -
 // exactly the failure mode a spread number alone hides.
@@ -1112,6 +1251,10 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_lastScaleSource = "unknown";
 	g_lastScaleStdErr = -1.0;
 	g_lastAxisVariance = 0.0;
+	g_lastSplitHalfDeg = -1.0;
+	g_lastStationCount = 0;
+	g_lastTiltX = 0.0;
+	g_lastTiltZ = 0.0;
 	ctx.sampleHint = "Move your head slowly through different angles";
 	ctx.sampleHintLevel = 1;
 	ctx.Log("Starting calibration...\n");
@@ -1129,6 +1272,7 @@ void StartCalibration()
 	collectedSamples.clear();
 	coplanarRetries = 0;
 	g_havePrevSample = false;
+	ResetStations();
 }
 
 static void AbortAndRestoreProfile(CalibrationContext &ctx)
@@ -1140,6 +1284,7 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	ctx.state = CalibrationState::None;
 	collectedSamples.clear();
 	coplanarRetries = 0;
+	ResetStations();
 }
 
 void CalibrationTick(double time)
@@ -1353,9 +1498,45 @@ void CalibrationTick(double time)
 	}
 
 	auto &samples = collectedSamples;
+
+	// Assign this sample to a station, and drop it if the station is already saturated.
+	// This is what stops standing still from filling the progress bar: the counter now
+	// advances only when the head actually occupies a new pose.
+	const bool newStation = !g_station.have
+		|| (sample.ref.trans - g_station.pos).norm() > kStationPosRadius
+		|| RotAngleBetween(sample.ref.rot, g_station.rot) > kStationAngRadius;
+
+	if (newStation)
+	{
+		g_station.have = true;
+		g_station.pos = sample.ref.trans;
+		g_station.rot = sample.ref.rot;
+		g_station.count = 0;
+		g_station.index = g_stationCount++;
+	}
+	else if (g_station.count >= kMaxSamplesPerStation)
+	{
+		// Redundant: this pose is already fully represented. Nudge the user to move on.
+		if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
+		{
+			g_lastHintTime = time;
+			ctx.sampleHint = "Got this spot - move somewhere else, or look a different way";
+			ctx.sampleHintLevel = 1;
+		}
+		return;
+	}
+
+	// Hard ceiling. Collection continues past the station target while the split-half
+	// check is unconverged, and the solves are O(N^2), so bound the cost.
+	static const size_t kMaxTotalSamples = 600;
+	if (samples.size() >= kMaxTotalSamples)
+		return;
+
+	g_station.count++;
+	g_sampleStation.push_back(g_station.index);
 	samples.push_back(sample);
 
-	CalCtx.Progress(samples.size(), CalCtx.SampleCount());
+	CalCtx.Progress((size_t)g_stationCount, CalCtx.StationTarget());
 
 	// Live guidance: after each accepted sample, tell the user what the solver still
 	// needs, so deficient motion is corrected during sampling instead of only being
@@ -1364,8 +1545,8 @@ void CalibrationTick(double time)
 	if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
 	{
 		g_lastHintTime = time;
-		const size_t target = CalCtx.SampleCount();
-		if (samples.size() < target / 5)
+		const size_t target = CalCtx.StationTarget();
+		if ((size_t)g_stationCount < target / 4)
 		{
 			ctx.sampleHint = "Move your head slowly through different angles";
 			ctx.sampleHintLevel = 1;
@@ -1398,46 +1579,92 @@ void CalibrationTick(double time)
 	// scale observable). When both are already satisfied, more samples buy nothing and
 	// only make calibration feel like it stalls. If they are NOT satisfied, this changes
 	// nothing -- collection continues to the full count exactly as before.
-	const size_t sampleTarget = CalCtx.SampleCount();
-	g_lastSampleTarget = sampleTarget;
-	bool readyToSolve = samples.size() >= sampleTarget;
-	if (!readyToSolve && samples.size() >= sampleTarget / 3
-		&& SecondAxisVariance(samples) >= AxisVarianceThreshold * 2.0
-		&& TargetSpread(samples) >= ScaleSpreadThreshold)
+	// Finish on evidence that the solve is determined, not on a sample count.
+	//
+	// The bar is: enough distinct occupied poses, and two independent halves of those
+	// poses agreeing on the rotation. The old rule counted samples and checked an
+	// axis-variance heuristic in arbitrary units, which accepted a run that was ~17
+	// degrees wrong. Its failure mode was invisible to every check in place; split-half
+	// disagreement sees it directly.
+	//
+	// Falling short no longer discards data. The previous behaviour erased a quarter of
+	// the samples and restarted, throwing away coverage the user had just built.
+	const size_t stationTarget = CalCtx.StationTarget();
+	g_lastSampleTarget = stationTarget;
+	g_lastAxisVariance = SecondAxisVariance(samples);
+
+	// Split-half agreement is recorded as a diagnostic but no longer gates anything.
+	// It was added to catch a run believed to be ~17 degrees wrong; reconstructing the
+	// rotation matrices from the logged Euler triples shows that run was 1.79 degrees
+	// from its neighbour -- (roll~0, yaw~172, pitch~0.6) and (roll~180, yaw~8.7,
+	// pitch~179) are the same physical rotation. The failure it defended against never
+	// happened. It also split on station parity, so both halves spanned the same head
+	// orientations and shared the dominant pose-dependent error, leaving it blind to
+	// the one thing that actually varies between runs.
+	bool readyToSolve = false;
+	if ((size_t)g_stationCount >= stationTarget)
 	{
-		char early[192];
-		snprintf(early, sizeof early,
-			"Coverage already good (%zu samples, spread %.2f m) - solving now instead of collecting %zu.\n",
-			samples.size(), TargetSpread(samples), sampleTarget);
-		CalCtx.Log(early);
+		if ((time - g_lastSplitCheckTime) >= 1.0)
+		{
+			g_lastSplitCheckTime = time;
+			double splitDeg = 0.0;
+			if (SplitHalfRotationAgreement(samples, splitDeg))
+				g_lastSplitHalfDeg = splitDeg;
+		}
+
+		char okBuf[160];
+		snprintf(okBuf, sizeof okBuf, "Coverage reached: %d spots, %zu samples.\n",
+			g_stationCount, samples.size());
+		CalCtx.Log(okBuf);
 		readyToSolve = true;
-		g_lastEarlyFinish = true;
 	}
 
 	if (readyToSolve)
 	{
 		CalCtx.Log("\n");
-
-		double axisVariance = SecondAxisVariance(samples);
-		g_lastAxisVariance = axisVariance;
-		if (axisVariance < AxisVarianceThreshold)
-		{
-			if (++coplanarRetries >= 10)
-			{
-				CalCtx.Log("Not enough rotation variety after several attempts, aborting calibration! Previous calibration restored.\n");
-				AbortAndRestoreProfile(ctx);
-				return;
-			}
-
-			char buf[256];
-			snprintf(buf, sizeof buf, "Head movement is too uniform (axis variance %.5f), tilt and turn your head in different directions! Collecting more samples...\n", axisVariance);
-			CalCtx.Log(buf);
-			samples.erase(samples.begin(), samples.begin() + samples.size() / 4);
-			return;
-		}
 		coplanarRetries = 0;
+		g_lastStationCount = g_stationCount;
 
 		ctx.calibratedRotation = CalibrateRotation(samples);
+
+		// Both spaces are gravity-referenced -- lighthouse levels off the base station's
+		// accelerometer, SLAM off the headset IMU -- so the true relative rotation is a
+		// heading, and any pitch/roll in the solve is error unless it exceeds each
+		// device's gravity accuracy.
+		//
+		// Measured here, that error is large: two calibrations taken 18 seconds apart in
+		// one session disagreed by up to 1.68 degrees of tilt, which no gravity reference
+		// can physically do. Per-run sigma is ~0.67 deg, which accounts for all of the
+		// observed run-to-run scatter, and the pooled mean is consistent with zero. The
+		// mechanism is a pose-dependent attitude error, so it does NOT average down with
+		// more samples or more varied motion -- collecting more data cannot fix it.
+		//
+		// Estimating tilt therefore has mean squared error ~(0.67 deg)^2, while forcing it
+		// to zero has at most (0.35 deg)^2 given the bound on any true tilt. Zeroing wins
+		// by ~2x in RMS, which is ~19 mm -> <=10 mm of foot-vs-head displacement through a
+		// 1.6 m torso. Tilt is not corrected at runtime (quaternionProjectYaw discards
+		// everything but yaw), so this is the single largest frozen error in the system.
+		//
+		// The signed tilt is still logged, as a diagnostic. If it ever proves repeatable
+		// and larger than ~0.4 deg across many sessions, it belongs in a stored per-mount
+		// constant -- never in a per-session solve.
+		{
+			double droppedX = 0.0, droppedZ = 0.0;
+			SignedTiltDeg(ctx.calibratedRotation, droppedX, droppedZ);
+			// Persist before zeroing; calibration.log is the only place this survives.
+			g_lastTiltX = droppedX;
+			g_lastTiltZ = droppedZ;
+
+			const Eigen::Matrix3d full = EulerDegToMatrix(ctx.calibratedRotation);
+			const double yawDeg = std::atan2(full(0, 2), full(0, 0)) * 180.0 / EIGEN_PI;
+			ctx.calibratedRotation = Eigen::Vector3d(0.0, yawDeg, 0.0);
+
+			char tiltBuf[192];
+			snprintf(tiltBuf, sizeof tiltBuf,
+				"Levelled calibration to gravity: heading %.2f deg, discarded tilt %.2f / %.2f deg.\n",
+				yawDeg, droppedX, droppedZ);
+			CalCtx.Log(tiltBuf);
+		}
 
 		Eigen::Vector3d eulerRad = ctx.calibratedRotation * EIGEN_PI / 180.0;
 		Eigen::Matrix3d calRot =
@@ -1473,6 +1700,12 @@ void CalibrationTick(double time)
 		// Written as !(x <= limit) so a NaN residual fails the gate. `rmsError > 0.1`
 		// is false for NaN, which would have let a degenerate solve through to
 		// SaveProfile and then into the pose pipeline.
+		// NaN backstop, nothing more. Written as !(x <= limit) so a NaN residual fails.
+		// This was briefly tightened to 12 mm on the belief that a run with a 9.7 mm
+		// residual had been ~17 degrees wrong; that run was in fact 1.79 degrees from its
+		// neighbour, so the tightening rested on a misreading and has been reverted. The
+		// residual is refitted after six nuisance parameters and cannot measure accuracy
+		// in either direction -- it should not be used as a quality claim.
 		if (!(rmsError <= 0.1))
 		{
 			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");

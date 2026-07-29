@@ -124,6 +124,25 @@ struct CalibrationContext
 		return 60;
 	}
 
+	// Distinct occupied poses required to finish. Progress is counted in these rather
+	// than in raw samples: sampling runs at 20 Hz while nearly still, so a sample count
+	// mostly measures how long you stood there, and could be satisfied without ever
+	// moving. A station is capped at a handful of samples, so this can only be reached
+	// by looking somewhere new or standing somewhere new.
+	size_t StationTarget()
+	{
+		switch (calibrationSpeed)
+		{
+		case FAST:
+			return 12;
+		case SLOW:
+			return 18;
+		case VERY_SLOW:
+			return 25;
+		}
+		return 12;
+	}
+
 	struct Message
 	{
 		enum Type
