@@ -57,6 +57,25 @@ private:
 	// this (slamSync) concurrently with the HMD thread writing it.
 	bool ApplyDrift(vr::DriverPose_t &pose);
 
+	// Converged EKF correction, for the heartbeat. Read without the lock like the
+	// neighbouring ekf.Pt diagnostic: these are logged figures, and a torn read costs
+	// one slightly-off log line rather than anything in the pose path.
+	double EkfYawCorrDeg() const
+	{
+		if (!ekf.valid)
+			return 0.0;
+		// yawCorr is a yaw-only quaternion, so the angle is 2*atan2(y, w).
+		return 2.0 * atan2(ekf.yawCorr.y, ekf.yawCorr.w) * 180.0 / 3.14159265358979323846;
+	}
+
+	double EkfTransMagCm() const
+	{
+		if (!ekf.valid)
+			return 0.0;
+		return sqrt(ekf.trans[0] * ekf.trans[0] + ekf.trans[1] * ekf.trans[1]
+			+ ekf.trans[2] * ekf.trans[2]) * 100.0;
+	}
+
 	double SlamToCorrectedScale() const
 	{
 		double k = hmdTracker.hmdScale > 0.0 ? 1.0 / hmdTracker.hmdScale : 1.0;

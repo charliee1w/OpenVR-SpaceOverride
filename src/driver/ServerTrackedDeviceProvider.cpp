@@ -1247,7 +1247,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					// disp_* is the estimator's own innovation and is NOT comparable between modes:
 					// in fusion it is the EKF post-yaw residual, in override the
 					// soft-gated drift residual. Compare like with like.
-					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu holds=%llu lg_holds=%llu speed_rej=%llu fallback=%llu nonfinite=%llu enabled=%d mode=%c disp_avg=%.1fcm disp_max=%.1fcm slam_steps=%llu sig=%.2fcm",
+					LOG("heartbeat frames=%llu ok=%llu bad=%llu jumps=%llu holds=%llu lg_holds=%llu speed_rej=%llu fallback=%llu nonfinite=%llu enabled=%d mode=%c disp_avg=%.1fcm disp_max=%.1fcm slam_steps=%llu sig=%.2fcm corr_yaw=%.2fdeg corr=%.1fcm",
 						(unsigned long long)diag.frames,
 						(unsigned long long)diag.trackerOkFrames,
 						(unsigned long long)diag.trackerBadFrames,
@@ -1265,7 +1265,15 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 						// EKF covariance is meaningless in override mode, where the EKF
 						// never runs: printing sqrt(1.0) as "100.00cm" implied a wildly
 						// unconverged filter rather than an unused one.
-						fusionMode ? sqrt(ekf.Pt) * 100.0 : 0.0);
+						fusionMode ? sqrt(ekf.Pt) * 100.0 : 0.0,
+						// The converged correction is an independent check on the
+						// calibration that the system already computes and was discarding.
+						// The EKF drives SLAM space onto lighthouse space, so whatever it
+						// settles at IS the calibration's error: a good calibration
+						// converges near zero, and a yaw that is N degrees off converges to
+						// N degrees. Nothing else in the system can measure that.
+						fusionMode ? EkfYawCorrDeg() : 0.0,
+						fusionMode ? EkfTransMagCm() : 0.0);
 					diag.dispSumCm = 0;
 					diag.dispMaxCm = 0;
 					diag.dispN = 0;
