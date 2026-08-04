@@ -1014,10 +1014,22 @@ void ComputeRelativeOffset(CalibrationContext &ctx, const std::vector<Sample> &s
 		CalCtx.Log(buf);
 	}
 
+	// Bounded averaging window. leverSamples persists in the profile (lever_n), so an
+	// uncapped count makes every recalibration weaker than the last: at n=20 a genuine
+	// 25 mm re-seat — under kRemountStepM, so blended rather than reset — moves the
+	// applied lever by 1.2 mm and leaves the user ~24 mm wrong, and the next run helps
+	// even less (1/22, 1/23, ...). That is the same "slight offset every time" symptom
+	// this averaging was added to remove, turned into a sticky one. Cap the window so
+	// it keeps averaging down noise but stays able to track a real remount.
+	static const int kMaxLeverAverage = 8;
 	Eigen::Vector3d merged = measured;
 	if (ctx.leverSamples > 0)
-		merged = prior + (measured - prior) / (double)(ctx.leverSamples + 1);
-	ctx.leverSamples++;
+	{
+		const int n = (std::min)(ctx.leverSamples, kMaxLeverAverage);
+		merged = prior + (measured - prior) / (double)(n + 1);
+	}
+	if (ctx.leverSamples < kMaxLeverAverage)
+		ctx.leverSamples++;
 
 	char leverBuf[224];
 	snprintf(leverBuf, sizeof leverBuf,
@@ -1216,6 +1228,8 @@ struct StationTracker
 static StationTracker g_station;
 static std::vector<int> g_sampleStation;   // parallel to the sample vector
 static int g_stationCount = 0;
+// High-water mark of the readiness bar, so it never runs backwards (display only).
+static double g_readyFracHigh = 0.0;
 // The split-half check re-solves the rotation twice and the solve is O(N^2) in samples,
 // so it is throttled rather than run on every accepted sample.
 static double g_lastSplitCheckTime = 0.0;
@@ -1236,6 +1250,7 @@ static void ResetStations()
 	g_station = StationTracker();
 	g_sampleStation.clear();
 	g_stationCount = 0;
+	g_readyFracHigh = 0.0;
 	g_lastSplitCheckTime = 0.0;
 	g_splitFailStart = 0.0;
 }
@@ -1611,7 +1626,11 @@ void CalibrationTick(double time)
 		g_station.pos = sample.ref.trans;
 		g_station.rot = sample.ref.rot;
 		g_station.count = 0;
-		g_station.index = g_stationCount++;
+		// At the sample ceiling nothing further is kept, so counting new stations would
+		// inflate stationFrac, stationsOk and the logged stations= field past the sample
+		// set actually being solved. Track the pose so hinting still works; don't count it.
+		if (!atSampleCap)
+			g_station.index = g_stationCount++;
 	}
 	else if (g_station.count >= kMaxSamplesPerStation)
 	{
@@ -1655,8 +1674,15 @@ void CalibrationTick(double time)
 	const double spreadFrac = (std::min)(1.0, spreadNow / ScaleSpreadThreshold);
 	const double axisFrac = (std::min)(1.0, axisNow / AxisVarianceThreshold);
 	const double readyFrac = (std::min)(stationFrac, (std::min)(spreadFrac, axisFrac));
+	// Display only, and held at its high-water mark. spreadFrac comes from TargetSpread,
+	// an RMS about the centroid, so pausing to accumulate samples in one spot after
+	// walking the room genuinely lowers it — and a progress bar that visibly runs
+	// backwards reads as a fault. The finish decision below uses the live gates
+	// (stationsOk/axisOk/spreadOk), never this value, so holding the bar cannot let a
+	// transient peak complete a run on coverage that has since decayed.
+	g_readyFracHigh = (std::max)(g_readyFracHigh, readyFrac);
 	// 0..1000 keeps integer Progress() smooth with three continuous gates.
-	CalCtx.Progress((int)(readyFrac * 1000.0 + 0.5), 1000);
+	CalCtx.Progress((int)(g_readyFracHigh * 1000.0 + 0.5), 1000);
 
 	// Live guidance: after each accepted sample, tell the user what the solver still
 	// needs, so deficient motion is corrected during sampling instead of only being

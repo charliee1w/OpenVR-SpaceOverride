@@ -110,21 +110,9 @@ struct CalibrationContext
 		continuousSync = true;
 	}
 
-	// Sample targets (cap / telemetry only). Finish is gated on stations + spread +
-	// axis variance in Calibration.cpp — raw sample count no longer completes a run.
-	size_t SampleCount()
-	{
-		switch (calibrationSpeed)
-		{
-		case FAST:
-			return 80;
-		case SLOW:
-			return 160;
-		case VERY_SLOW:
-			return 280;
-		}
-		return 80;
-	}
+	// (SampleCount() removed: nothing read it. Its values were still being maintained,
+	// and its comment called it a "cap" — the real ceiling is kMaxTotalSamples in
+	// Calibration.cpp. Finish is gated on stations + spread + axis variance.)
 
 	// Distinct occupied poses required (one of three finish gates). A station is a
 	// pose within a position/orientation radius; micro-yaw used to mint stations and
