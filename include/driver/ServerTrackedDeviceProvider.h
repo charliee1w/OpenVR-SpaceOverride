@@ -56,6 +56,10 @@ private:
 	// Snapshots the correction under driftMutex, since non-HMD pose threads call
 	// this (slamSync) concurrently with the HMD thread writing it.
 	bool ApplyDrift(vr::DriverPose_t &pose);
+	// Shared estimator wipe for mode switch / disable / tracker change (N1-b).
+	// Caller must hold configMutex exclusive. clearLastGood / clearSlamSync match
+	// the previous call-site behaviour (disable clears both; mode switch clears neither).
+	void ResetEstimators(bool clearLastGood, bool clearSlamSync);
 
 	// Converged EKF correction, for the heartbeat. Read without the lock like the
 	// neighbouring ekf.Pt diagnostic: these are logged figures, and a torn read costs
@@ -84,9 +88,12 @@ private:
 
 	// P1-b: cache head tracker from its own pose hook (avoids GetRaw every HMD frame).
 	void CacheTrackerWorldPose(const vr::DriverPose_t &pose);
-	// Prefer fresh hook cache; fall back to unpredicted GetRaw.
+	// Prefer fresh hook cache. outAgeSec is seconds since the cached sample
+	// (used to inflate measurement noise after dead-reckoning). outResult is the
+	// OpenVR tracking result stamped when the sample was cached (N1-e).
 	bool FetchTrackerSample(vr::HmdQuaternion_t &outRot, double outPos[3],
-		double outVel[3], double outAngVel[3], double &outLinSpeed);
+		double outVel[3], double outAngVel[3], double &outLinSpeed, double &outAgeSec,
+		vr::ETrackingResult &outResult);
 	// P2-a: display Hz queried at most ~1 Hz.
 	double GetCachedDisplayHz(uint32_t hmdOpenVRID);
 	// P0-b: finite pos/quat.
@@ -182,6 +189,8 @@ private:
 		double position[3] = { 0, 0, 0 };
 		double velocity[3] = { 0, 0, 0 };
 		double angularVelocity[3] = { 0, 0, 0 };
+		// N1-e: OpenVR tracking result at cache time (Running_OK vs degraded).
+		vr::ETrackingResult result = vr::TrackingResult_Uninitialized;
 	} cachedTracker;
 
 	// V2-b: IPC setters exclusive; pose threads hold shared for the whole callback.
@@ -246,7 +255,8 @@ private:
 	// and tau*velocity is degenerate with the translation state, so it rode noise.
 	bool FusionEkfUpdate(const vr::HmdQuaternion_t &obsRot, const double obsPos[3],
 		const vr::HmdQuaternion_t &rawRot, const double rawPos[3],
-		double linSpeed, double angSpeed);
+		double linSpeed, double angSpeed, double measAgeSec = 0.0,
+		vr::ETrackingResult trackerResult = vr::TrackingResult_Running_OK);
 
 	// P0-b/V0-c/V1 publish gates shared by override and fusion paths.
 	// Returns false when the pose was replaced by a last-good hold or invalidated
