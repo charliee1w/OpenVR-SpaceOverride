@@ -884,11 +884,23 @@ void ServerTrackedDeviceProvider::CacheTrackerWorldPose(const vr::DriverPose_t& 
 	double ang[3] = {
 		pose.vecAngularVelocity[0], pose.vecAngularVelocity[1], pose.vecAngularVelocity[2]
 	};
+	// Measure before clamping. The clamp below exists so nothing publishes or
+	// dead-reckons on an absurd rate, but FetchTrackerSample's reject gate uses the
+	// same constant — clamping first made that gate unreachable, so a 50 m/s
+	// lighthouse glitch was silently rewritten to 8 m/s and accepted instead of
+	// dropping to the last-good hold. Keep the measured magnitude for the gate.
+	const double measuredSpeed = std::isfinite(vel[0]) && std::isfinite(vel[1]) && std::isfinite(vel[2])
+		? sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2])
+		: 0.0;
+
 	// N1-c: refuse non-finite rates before they enter the cache / coast path.
 	SanitizeVec3Velocity(vel, kMaxPlausibleHeadSpeed);
 	SanitizeVec3Velocity(ang, 20.0); // rad/s — above any real head rate
 
-	vr::HmdVector3d_t worldVel = quaternionRotateVector(pose.qWorldFromDriverRotation, vel);
+	// Normalize both rotations: a non-unit quaternion scales the rotated vector by
+	// |q|^2, which would quietly rescale the very speed the gate tests.
+	vr::HmdVector3d_t worldVel = quaternionRotateVector(
+		quaternionNormalize(pose.qWorldFromDriverRotation), vel);
 	vr::HmdVector3d_t worldAng = quaternionRotateVector(
 		quaternionNormalize(pose.qWorldFromDriverRotation * pose.qRotation),
 		ang);
@@ -906,6 +918,7 @@ void ServerTrackedDeviceProvider::CacheTrackerWorldPose(const vr::DriverPose_t& 
 	next.angularVelocity[0] = worldAng.v[0];
 	next.angularVelocity[1] = worldAng.v[1];
 	next.angularVelocity[2] = worldAng.v[2];
+	next.measuredSpeed = measuredSpeed;
 	next.result = pose.result;
 	QueryPerformanceCounter(&next.timestamp);
 	next.valid = true;
@@ -963,9 +976,11 @@ bool ServerTrackedDeviceProvider::FetchTrackerSample(
 		outVel[i] = cache.velocity[i];
 		outAngVel[i] = cache.angularVelocity[i];
 	}
-	outLinSpeed = sqrt(outVel[0] * outVel[0] + outVel[1] * outVel[1] + outVel[2] * outVel[2]);
-
 	// V0-a: keep the measured speed on rejection so speed_rej diags stay truthful.
+	// This is the pre-clamp magnitude on purpose — outVel has already been limited
+	// to kMaxPlausibleHeadSpeed, so gating on it could never fire.
+	outLinSpeed = cache.measuredSpeed;
+
 	if (outLinSpeed > maxAcceptLinSpeed
 		|| !IsFiniteQuat(outRot)
 		|| !IsFiniteVec3(outPos)
@@ -1291,6 +1306,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			const bool trackerPoseOk = FetchTrackerSample(trackerQuat, rawTrackerPos, trackerVel, trackerAngVel,
 				linSpeed, trackerAgeSec, trackerResult);
 			const bool speedReject = !trackerPoseOk && linSpeed > kMaxPlausibleHeadSpeed;
+			// N1-e accepts Running_OutOfRange into the cache and compensates with R*25
+			// — but that inflation lives in FusionEkfUpdate only. The override rebuild
+			// applies the sample with no quality weighting at all, so a tracker drifting
+			// on IMU outside base-station coverage would steer the published HMD pose
+			// directly. Override takes OK samples only; degraded ones fall to the
+			// last-good hold / SLAM-fallback branch, which is what it is there for.
+			const bool trackerOkForOverride =
+				trackerPoseOk && trackerResult == vr::TrackingResult_Running_OK;
 
 			// P2-b: first solid OK starts "play" counters (ignore pre-cal BAD noise).
 			if (trackerPoseOk && !diag.playPrimed)
@@ -1398,25 +1421,32 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			// FUSION: SLAM is the source; the tracker only observes the SLAM→lighthouse
 			// correction. LOS loss is a non-event (correction freezes). SLAM relocation
 			// steps are attributed against the tracker and cancelled in the same frame.
-			// N1-b: never fall through to the classic override path while fusion is on —
-			// a single rawValid==false frame used to hit UpdateDrift (One-Euro), clobber
-			// the published correction while ekf was untouched, and latch because the
-			// One-Euro filters set initialized=true and were never reset.
-			if (fusionMode && !hmdTracker.native)
+			// N1-b originally justified this by saying a rawValid==false frame "used to
+			// hit UpdateDrift (One-Euro) and clobber the published correction". That was
+			// not true: UpdateDrift on the override path is guarded by `if (rawValid)`
+			// below, and was before N1-b too. What the fall-through actually did was
+			// rebuild a valid HMD pose from a perfectly good lighthouse tracker — which
+			// is worth keeping. So: SLAM invalid holds last-good first, and only then
+			// falls through to the tracker-driven rebuild. UpdateDrift still cannot run
+			// (rawValid is false), so the EKF's correction is not touched either way.
+			const bool fusionActive = fusionMode && !hmdTracker.native;
+			if (fusionActive && !rawValid)
 			{
-				if (!rawValid)
+				if (ApplyLastGoodHmd(pose, 0.15))
 				{
-					// SLAM itself invalid: hold last good briefly, else mark invalid.
-					// Do NOT run override rebuild / One-Euro drift.
-					if (ApplyLastGoodHmd(pose, 0.15))
-					{
-						++diag.lastGoodHolds;
-						return true;
-					}
+					++diag.lastGoodHolds;
+					return true;
+				}
+				if (!trackerOkForOverride)
+				{
 					pose.poseIsValid = false;
 					pose.result = vr::TrackingResult_Running_OutOfRange;
 					return true;
 				}
+				// Fall through to the tracker-driven rebuild below.
+			}
+			else if (fusionActive)
+			{
 				if (trackerPoseOk)
 				{
 					// Observed head pose from the tracker (same math as override, not published).
@@ -1548,7 +1578,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				return true;
 			}
 
-			if (trackerPoseOk)
+			if (trackerOkForOverride)
 			{
 				vr::HmdQuaternion_t trackerRefRotation = quaternionNormalize(hmdTracker.calibrationRotation * trackerQuat);
 

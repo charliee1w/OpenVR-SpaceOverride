@@ -189,6 +189,11 @@ private:
 		double position[3] = { 0, 0, 0 };
 		double velocity[3] = { 0, 0, 0 };
 		double angularVelocity[3] = { 0, 0, 0 };
+		// Speed as *measured*, before the N1-c plausibility clamp. `velocity` stays
+		// clamped so nothing publishes or coasts on an absurd rate, but the reject
+		// gate has to see the truth: clamping to exactly the value the gate then
+		// tests against made that gate unreachable and pinned speed_rej at 0.
+		double measuredSpeed = 0.0;
 		// N1-e: OpenVR tracking result at cache time (Running_OK vs degraded).
 		vr::ETrackingResult result = vr::TrackingResult_Uninitialized;
 	} cachedTracker;
