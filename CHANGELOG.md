@@ -82,6 +82,12 @@ runtime** — which made the bugs below much worse than they looked.
   samples a second — each advancing the counter, none adding information. A station
   is one occupied pose, capped at ten samples. Calibrations now finish on 59–113
   samples instead of 250–500.
+- **Finish requires stations + positional spread + axis variance (N3-a, 2026-08-01).**
+  Station count alone used to complete runs in ~20 s of micro-yaw, with
+  `scale_src=kept_low_spread` and a frozen residual offset. The progress bar is the
+  minimum of the three fractions; station radii were widened (8 cm / 18°) so tiny
+  head wiggles cannot mint stations; default speed is Slow. Lever-arm sample count
+  (`lever_n`) is persisted so the running average survives relaunches.
 - **Live motion coaching** during sampling: tells you which motion the solver still
   needs (rotation variety, more of the play space) and when samples are being
   dropped for moving too fast, instead of a bar that stalls without explanation.
@@ -118,6 +124,16 @@ runtime** — which made the bugs below much worse than they looked.
 - Last-known-good hold on tracker loss, bounded by age.
 - Head tracker is parked out of the way ("quashed") so applications do not bind it
   as a body tracker.
+- **N1 fusion measurement model (2026-07-31).** Dead-reckoned tracker samples no longer
+  enter the EKF as fresh centimetre-class measurements: Rt/Rθ inflate with coast age,
+  rotation is integrated with angular velocity over the same age as position, and a bad
+  sample invalidates the cache instead of leaving a stale coast for 150 ms. Fusion never
+  falls through to the override/One-Euro path on a single bad SLAM frame (unified
+  `ResetEstimators`). Published velocity is finite-checked and clamped; the zero
+  quaternion is rejected; `DeviceTransform` starts as identity/scale 1; the head lever
+  scales with the same slam scale as position. `eTrackingResult` is cached — OutOfRange
+  is accepted with inflated R. Slam-step cancellation inflates Pt so the filter does not
+  claim sub-millimetre confidence in a state that just teleported.
 - Fixed a use-after-free draining the IPC pipe set on shutdown.
 - Fixed a data race on the correction state between the estimator and the pose
   threads.
