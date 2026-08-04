@@ -51,6 +51,12 @@ static int g_lastStationCount = 0;
 // budget with a wide range (0-29 mm), so it has to survive to disk.
 static double g_lastTiltX = 0.0;
 static double g_lastTiltZ = 0.0;
+// Running average of the head-tracker lever arm across calibrations, plus this run's
+// raw measurement so the log shows both and the scatter stays visible. The sample
+// count itself lives in CalibrationContext::leverSamples so it persists and resets
+// together with relativeTranslation instead of drifting out of sync with it.
+static Eigen::Vector3d g_lastLever = Eigen::Vector3d::Zero();
+static Eigen::Vector3d g_lastLeverRaw = Eigen::Vector3d::Zero();
 
 // How far the calibration tips the vertical axis, in degrees. Both spaces are
 // gravity-levelled, so the true relative rotation has yaw as its only free degree of
@@ -150,6 +156,13 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  roll=" << ctx.calibratedRotation(0)
 		<< "  tilt_x=" << tiltX
 		<< "  tilt_z=" << tiltZ
+		// Raw lever arm this run, and the running average actually applied. The raw
+		// column is what reveals run-to-run scatter; the averaged one is what ships.
+		<< "  lever_raw_mm=" << std::setprecision(1)
+		<< g_lastLeverRaw.x() * 1000.0 << "/" << g_lastLeverRaw.y() * 1000.0 << "/" << g_lastLeverRaw.z() * 1000.0
+		<< "  lever_mm=" << g_lastLever.x() * 1000.0 << "/" << g_lastLever.y() * 1000.0 << "/" << g_lastLever.z() * 1000.0
+		<< "  lever_n=" << ctx.leverSamples
+		<< std::setprecision(2)
 		<< "  split_deg=" << g_lastSplitHalfDeg
 		<< "  stations=" << g_lastStationCount
 		<< "  axis_var=" << std::setprecision(6) << g_lastAxisVariance
@@ -951,9 +964,74 @@ void ComputeRelativeOffset(CalibrationContext &ctx, const std::vector<Sample> &s
 	ctx.relativeRotation.x = q.x();
 	ctx.relativeRotation.y = q.y();
 	ctx.relativeRotation.z = q.z();
-	ctx.relativeTranslation.v[0] = transAccum.x();
-	ctx.relativeTranslation.v[1] = transAccum.y();
-	ctx.relativeTranslation.v[2] = transAccum.z();
+	// The lever arm is a physical constant: the tracker is rigidly mounted, so this
+	// vector cannot actually change between calibrations. Measured, it moves ~12 mm run
+	// to run (observed 103.3 mm vs 91.7 mm magnitude, 13 mm of it in Z), because it is
+	// recovered from the arc the tracker sweeps under head rotation and recent runs
+	// sample that arc thinly. That noise lands directly as a shift between the view and
+	// the body trackers -- recalibrate, get a different offset -- which is exactly the
+	// "slight offset every time" symptom.
+	//
+	// Averaging repeated measurements of a fixed quantity is unambiguously correct and
+	// has no tunable: each calibration contributes 1/n and the estimate tightens with
+	// use instead of jumping to the latest noisy draw. A remount genuinely does change
+	// the vector, so a large step restarts the average rather than being blended away;
+	// the bound is set from physical plausibility (a re-seat moves the tracker much
+	// further than the estimator's ~12 mm scatter), not fitted to any run.
+	const Eigen::Vector3d measured = transAccum;
+	static const double kRemountStepM = 0.030;
+	// Typical run-to-run scatter of the estimator itself (see comment above: ~12 mm
+	// observed). A shift below this is ordinary noise; above it but still under the
+	// remount cutoff is neither clearly noise nor clearly a remount, so it gets blended
+	// in (as before) but is called out in the log instead of passing silently.
+	static const double kNoiseFloorM = 0.012;
+
+	const Eigen::Vector3d prior(
+		ctx.relativeTranslation.v[0], ctx.relativeTranslation.v[1], ctx.relativeTranslation.v[2]);
+
+	// A profile loaded from disk carries a lever arm already, so it counts as one prior
+	// observation; otherwise a new session would discard everything learned before it.
+	if (ctx.validRelativeOffset && ctx.leverSamples == 0)
+		ctx.leverSamples = 1;
+
+	const double shiftM = (measured - prior).norm();
+	if (ctx.leverSamples > 0 && shiftM > kRemountStepM)
+	{
+		char buf[192];
+		snprintf(buf, sizeof buf,
+			"Head tracker offset moved %.0f mm - treating as a remount and starting a fresh average.\n",
+			shiftM * 1000.0);
+		CalCtx.Log(buf);
+		ctx.leverSamples = 0;
+	}
+	else if (ctx.leverSamples > 0 && shiftM > kNoiseFloorM)
+	{
+		char buf[192];
+		snprintf(buf, sizeof buf,
+			"Head tracker offset moved %.0f mm - more than typical run-to-run noise but under the remount\n"
+			"threshold, so it is being blended into the average rather than reset.\n",
+			shiftM * 1000.0);
+		CalCtx.Log(buf);
+	}
+
+	Eigen::Vector3d merged = measured;
+	if (ctx.leverSamples > 0)
+		merged = prior + (measured - prior) / (double)(ctx.leverSamples + 1);
+	ctx.leverSamples++;
+
+	char leverBuf[224];
+	snprintf(leverBuf, sizeof leverBuf,
+		"Head tracker offset: this run (%.1f, %.1f, %.1f) mm; averaged over %d run(s) -> (%.1f, %.1f, %.1f) mm.\n",
+		measured.x() * 1000.0, measured.y() * 1000.0, measured.z() * 1000.0, ctx.leverSamples,
+		merged.x() * 1000.0, merged.y() * 1000.0, merged.z() * 1000.0);
+	CalCtx.Log(leverBuf);
+
+	g_lastLever = merged;
+	g_lastLeverRaw = measured;
+
+	ctx.relativeTranslation.v[0] = merged.x();
+	ctx.relativeTranslation.v[1] = merged.y();
+	ctx.relativeTranslation.v[2] = merged.z();
 	ctx.validRelativeOffset = true;
 }
 
@@ -1119,8 +1197,12 @@ static int g_rejLinCount = 0;
 // collected, so the counter can only advance by actually moving or looking somewhere
 // new -- which is exactly the motion the solve needs. Progress is then measured in
 // stations, not samples.
-static const double kStationPosRadius = 0.05;          // m
-static const double kStationAngRadius = 10.0 * EIGEN_PI / 180.0;
+// Wider than the original 5 cm / 10° so a slow yaw in place cannot mint a new
+// "station" every few degrees and fill the progress bar without ever walking.
+// Finish also requires TargetSpread + SecondAxisVariance; stations alone never
+// complete a run (see readyToSolve below).
+static const double kStationPosRadius = 0.08;          // m
+static const double kStationAngRadius = 18.0 * EIGEN_PI / 180.0;
 static const int kMaxSamplesPerStation = 10;           // beyond this a pose is redundant
 
 struct StationTracker
@@ -1230,7 +1312,21 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	ctx.targetID = targetID;
 	ctx.targetTrackingSystem = GetDeviceTrackingSystem(targetID);
 	ctx.hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
-	ctx.trackerSerial = GetDeviceSerial(targetID);
+
+	std::string newTrackerSerial = GetDeviceSerial(targetID);
+	// The lever arm is rigidly tied to one physical tracker. Averaging across a tracker
+	// swap would blend two unrelated mount points together (the 30 mm remount-distance
+	// check only catches this by coincidence, if the new lever arm happens to differ
+	// enough). Keying the reset on serial identity catches every swap, not just distant
+	// ones.
+	if (ctx.validRelativeOffset && !ctx.trackerSerial.empty() && newTrackerSerial != ctx.trackerSerial)
+	{
+		ctx.Log("Target tracker changed - starting a fresh head-tracker offset average.\n");
+		ctx.relativeTranslation = { 0, 0, 0 };
+		ctx.validRelativeOffset = false;
+		ctx.leverSamples = 0;
+	}
+	ctx.trackerSerial = newTrackerSerial;
 
 	char buf[256];
 	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
@@ -1498,6 +1594,9 @@ void CalibrationTick(double time)
 	}
 
 	auto &samples = collectedSamples;
+	// Hard ceiling. Solves are O(N^2). Once full, do not append; still run finish logic.
+	static const size_t kMaxTotalSamples = 600;
+	const bool atSampleCap = samples.size() >= kMaxTotalSamples;
 
 	// Assign this sample to a station, and drop it if the station is already saturated.
 	// This is what stops standing still from filling the progress bar: the counter now
@@ -1516,27 +1615,48 @@ void CalibrationTick(double time)
 	}
 	else if (g_station.count >= kMaxSamplesPerStation)
 	{
-		// Redundant: this pose is already fully represented. Nudge the user to move on.
-		if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
+		// Redundant pose. At the sample cap, fall through so we can force-finish;
+		// otherwise nudge and wait for a new station.
+		if (!atSampleCap)
 		{
-			g_lastHintTime = time;
-			ctx.sampleHint = "Got this spot - move somewhere else, or look a different way";
-			ctx.sampleHintLevel = 1;
+			if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
+			{
+				g_lastHintTime = time;
+				ctx.sampleHint = "Got this spot - move somewhere else, or look a different way";
+				ctx.sampleHintLevel = 1;
+			}
+			return;
 		}
-		return;
 	}
 
-	// Hard ceiling. Collection continues past the station target while the split-half
-	// check is unconverged, and the solves are O(N^2), so bound the cost.
-	static const size_t kMaxTotalSamples = 600;
-	if (samples.size() >= kMaxTotalSamples)
+	if (!atSampleCap)
+	{
+		g_station.count++;
+		g_sampleStation.push_back(g_station.index);
+		samples.push_back(sample);
+	}
+	if (samples.empty())
 		return;
 
-	g_station.count++;
-	g_sampleStation.push_back(g_station.index);
-	samples.push_back(sample);
+	// Three independent readiness fractions. The bar tracks the *weakest* gate so it
+	// cannot hit 100% while scale is still unobservable (spread) or translation Y is
+	// in the null space (yaw-only motion → low axis variance). Station count alone used
+	// to complete runs in ~20s with scale_src=kept_low_spread and a frozen residual offset.
+	const size_t stationTarget = CalCtx.StationTarget();
+	const double spreadNow = TargetSpread(samples);
+	const double axisNow = SecondAxisVariance(samples);
+	g_lastSampleTarget = stationTarget;
+	g_lastAxisVariance = axisNow;
+	g_lastScaleSpread = spreadNow;
 
-	CalCtx.Progress((size_t)g_stationCount, CalCtx.StationTarget());
+	// (std::min) avoids Windows.h min/max macros.
+	const double stationDenom = stationTarget > 0 ? (double)stationTarget : 1.0;
+	const double stationFrac = (std::min)(1.0, (double)g_stationCount / stationDenom);
+	const double spreadFrac = (std::min)(1.0, spreadNow / ScaleSpreadThreshold);
+	const double axisFrac = (std::min)(1.0, axisNow / AxisVarianceThreshold);
+	const double readyFrac = (std::min)(stationFrac, (std::min)(spreadFrac, axisFrac));
+	// 0..1000 keeps integer Progress() smooth with three continuous gates.
+	CalCtx.Progress((int)(readyFrac * 1000.0 + 0.5), 1000);
 
 	// Live guidance: after each accepted sample, tell the user what the solver still
 	// needs, so deficient motion is corrected during sampling instead of only being
@@ -1545,77 +1665,70 @@ void CalibrationTick(double time)
 	if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
 	{
 		g_lastHintTime = time;
-		const size_t target = CalCtx.StationTarget();
-		if ((size_t)g_stationCount < target / 4)
+		if (stationFrac < 0.25)
 		{
 			ctx.sampleHint = "Move your head slowly through different angles";
 			ctx.sampleHintLevel = 1;
 		}
-		else if (SecondAxisVariance(samples) < AxisVarianceThreshold * 2.0)
+		else if (axisFrac < 1.0)
 		{
 			ctx.sampleHint = "Add rotation variety - tilt ear-to-shoulder and look up/down, not just left and right";
 			ctx.sampleHintLevel = 1;
 		}
-		else if (TargetSpread(samples) < ScaleSpreadThreshold)
+		else if (spreadFrac < 1.0)
 		{
 			// Samples are only taken while you are still, so the motion that works is
 			// move-then-pause rather than continuous walking.
-			ctx.sampleHint = "Move to a different spot or height, pause, then look around - repeat to lock in scale";
+			ctx.sampleHint = "Walk to another spot or crouch, pause, look around - need more space coverage for scale";
 			ctx.sampleHintLevel = 1;
+		}
+		else if (stationFrac < 1.0)
+		{
+			ctx.sampleHint = "Looking good - keep covering new angles/spots until the bar fills";
+			ctx.sampleHintLevel = 0;
 		}
 		else
 		{
-			ctx.sampleHint = "Looking good - keep moving smoothly until the bar fills";
+			ctx.sampleHint = "Coverage ready - finishing calibration";
 			ctx.sampleHintLevel = 0;
 		}
 	}
 
-	// Stop as soon as the data is actually good enough to solve, instead of always
-	// grinding out the full sample count. Samples are only taken while nearly still,
-	// so standing in one spot piles up near-identical samples that advance the counter
-	// without adding information -- while the walking that scale observability needs
-	// collects nothing. The count is therefore a poor completion test: what matters is
-	// rotation variety (conditions the rotation solve) and positional spread (makes
-	// scale observable). When both are already satisfied, more samples buy nothing and
-	// only make calibration feel like it stalls. If they are NOT satisfied, this changes
-	// nothing -- collection continues to the full count exactly as before.
-	// Finish on evidence that the solve is determined, not on a sample count.
-	//
-	// The bar is: enough distinct occupied poses, and two independent halves of those
-	// poses agreeing on the rotation. The old rule counted samples and checked an
-	// axis-variance heuristic in arbitrary units, which accepted a run that was ~17
-	// degrees wrong. Its failure mode was invisible to every check in place; split-half
-	// disagreement sees it directly.
-	//
-	// Falling short no longer discards data. The previous behaviour erased a quarter of
-	// the samples and restarted, throwing away coverage the user had just built.
-	const size_t stationTarget = CalCtx.StationTarget();
-	g_lastSampleTarget = stationTarget;
-	g_lastAxisVariance = SecondAxisVariance(samples);
-
-	// Split-half agreement is recorded as a diagnostic but no longer gates anything.
-	// It was added to catch a run believed to be ~17 degrees wrong; reconstructing the
-	// rotation matrices from the logged Euler triples shows that run was 1.79 degrees
-	// from its neighbour -- (roll~0, yaw~172, pitch~0.6) and (roll~180, yaw~8.7,
-	// pitch~179) are the same physical rotation. The failure it defended against never
-	// happened. It also split on station parity, so both halves spanned the same head
-	// orientations and shared the dominant pose-dependent error, leaving it blind to
-	// the one thing that actually varies between runs.
+	// Finish only when all three gates pass:
+	//   stations  — enough distinct poses (not micro-yaw duplicates)
+	//   axis var  — second principal component of orientation (N3-a; yaw-only is insufficient)
+	//   spread    — positional RMS that makes scale/lever observable (else kept_low_spread)
+	// Split-half remains diagnostic-only (Euler twin ambiguity made it a false positive).
 	bool readyToSolve = false;
-	if ((size_t)g_stationCount >= stationTarget)
-	{
-		if ((time - g_lastSplitCheckTime) >= 1.0)
-		{
-			g_lastSplitCheckTime = time;
-			double splitDeg = 0.0;
-			if (SplitHalfRotationAgreement(samples, splitDeg))
-				g_lastSplitHalfDeg = splitDeg;
-		}
+	const bool stationsOk = (size_t)g_stationCount >= stationTarget;
+	const bool axisOk = axisNow >= AxisVarianceThreshold;
+	const bool spreadOk = spreadNow >= ScaleSpreadThreshold;
 
-		char okBuf[160];
-		snprintf(okBuf, sizeof okBuf, "Coverage reached: %d spots, %zu samples.\n",
-			g_stationCount, samples.size());
+	if (stationsOk && (time - g_lastSplitCheckTime) >= 1.0)
+	{
+		g_lastSplitCheckTime = time;
+		double splitDeg = 0.0;
+		if (SplitHalfRotationAgreement(samples, splitDeg))
+			g_lastSplitHalfDeg = splitDeg;
+	}
+
+	if (stationsOk && axisOk && spreadOk)
+	{
+		char okBuf[192];
+		snprintf(okBuf, sizeof okBuf,
+			"Coverage ready: %d spots, spread %.2f m, axis_var %.5f, %zu samples.\n",
+			g_stationCount, spreadNow, axisNow, samples.size());
 		CalCtx.Log(okBuf);
+		readyToSolve = true;
+	}
+	else if (atSampleCap && stationsOk)
+	{
+		// Prefer a best-effort solve over an infinite stuck bar. RMS gate can still abort.
+		char capBuf[192];
+		snprintf(capBuf, sizeof capBuf,
+			"Sample ceiling (%zu) with incomplete coverage (spots=%d spread=%.2f axis=%.5f) - solving anyway.\n",
+			kMaxTotalSamples, g_stationCount, spreadNow, axisNow);
+		CalCtx.Log(capBuf);
 		readyToSolve = true;
 	}
 

@@ -122,10 +122,14 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.relativeTranslation.v[1] = obj["rel_ty"].get<double>();
 		ctx.relativeTranslation.v[2] = obj["rel_tz"].get<double>();
 		ctx.validRelativeOffset = true;
+		// Absent in profiles saved before this field existed; those still carry exactly
+		// one prior lever-arm observation, same as ComputeRelativeOffset's own fallback.
+		ctx.leverSamples = obj["lever_n"].is<double>() ? (int) obj["lever_n"].get<double>() : 1;
 	}
 	else
 	{
 		ctx.validRelativeOffset = false;
+		ctx.leverSamples = 0;
 	}
 
 	if (obj["calibration_speed"].is<double>())
@@ -223,6 +227,8 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 		profile["rel_tx"].set<double>(ctx.relativeTranslation.v[0]);
 		profile["rel_ty"].set<double>(ctx.relativeTranslation.v[1]);
 		profile["rel_tz"].set<double>(ctx.relativeTranslation.v[2]);
+		double leverSamples = ctx.leverSamples;
+		profile["lever_n"].set<double>(leverSamples);
 	}
 
 	double speed = (int) ctx.calibrationSpeed;

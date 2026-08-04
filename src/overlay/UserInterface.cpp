@@ -26,7 +26,7 @@ void UserInterface::Render(bool runningInOverlay)
 {
 	auto textWithWidth = [](const char *label, const char *text, float width) {
 		ImGui::BeginChild(label, ImVec2(width, ImGui::GetTextLineHeightWithSpacing()));
-		ImGui::Text(text);
+		ImGui::Text("%s", text);
 		ImGui::EndChild();
 	};
 
@@ -255,7 +255,11 @@ void UserInterface::Render(bool runningInOverlay)
 					switch (message.type)
 					{
 					case CalibrationContext::Message::String:
-						ImGui::TextWrapped(message.str.c_str());
+						// message.str can embed device-reported strings (serial numbers,
+						// tracking system names) via Log(); passing it as the format
+						// argument would let a crafted device string containing "%s"/"%n"
+						// read or write through ImGui's varargs.
+						ImGui::TextWrapped("%s", message.str.c_str());
 						break;
 					case CalibrationContext::Message::Progress:
 						float fraction = (float)message.progress / (float)message.target;

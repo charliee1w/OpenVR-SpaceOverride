@@ -33,6 +33,10 @@ struct CalibrationContext
 	vr::HmdQuaternion_t relativeRotation = { 1, 0, 0, 0 };
 	vr::HmdVector3d_t relativeTranslation = { 0, 0, 0 };
 	bool validRelativeOffset = false;
+	// Number of calibrations averaged into relativeTranslation so far. Persisted
+	// alongside it (see Configuration.cpp) so the running average actually
+	// accumulates across sessions instead of resetting every relaunch.
+	int leverSamples = 0;
 
 	std::string targetTrackingSystem;
 
@@ -68,7 +72,8 @@ struct CalibrationContext
 		SLOW = 1,
 		VERY_SLOW = 2
 	};
-	Speed calibrationSpeed = FAST;
+	// Prefer Slow for Quest/VD wireless latency; Fast finishes before scale is observed.
+	Speed calibrationSpeed = SLOW;
 
 	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
 
@@ -96,6 +101,7 @@ struct CalibrationContext
 		relativeRotation = { 1, 0, 0, 0 };
 		relativeTranslation = { 0, 0, 0 };
 		validRelativeOffset = false;
+		leverSamples = 0;
 		targetTrackingSystem = "";
 		hmdSerial = "";
 		trackerSerial = "";
@@ -104,43 +110,38 @@ struct CalibrationContext
 		continuousSync = true;
 	}
 
-	// Sample targets. These used to be 100/250/500, which was far more than the solve
-	// needs: samples are only taken while nearly still, so a head turning in one spot
-	// produces hundreds of near-duplicates that add no information. The cost was paid
-	// in user patience -- and worse, the time spent standing still grinding out the
-	// count is time not spent covering the play space, which is the one thing scale
-	// observability actually requires. Halving them buys back that time.
+	// Sample targets (cap / telemetry only). Finish is gated on stations + spread +
+	// axis variance in Calibration.cpp — raw sample count no longer completes a run.
 	size_t SampleCount()
 	{
 		switch (calibrationSpeed)
 		{
 		case FAST:
-			return 60;
+			return 80;
 		case SLOW:
-			return 140;
+			return 160;
 		case VERY_SLOW:
-			return 250;
+			return 280;
 		}
-		return 60;
+		return 80;
 	}
 
-	// Distinct occupied poses required to finish. Progress is counted in these rather
-	// than in raw samples: sampling runs at 20 Hz while nearly still, so a sample count
-	// mostly measures how long you stood there, and could be satisfied without ever
-	// moving. A station is capped at a handful of samples, so this can only be reached
-	// by looking somewhere new or standing somewhere new.
+	// Distinct occupied poses required (one of three finish gates). A station is a
+	// pose within a position/orientation radius; micro-yaw used to mint stations and
+	// fill the bar while translation (scale/lever) stayed unobserved. Station radii
+	// were widened and finish also requires positional spread + rotation variety.
 	size_t StationTarget()
 	{
 		switch (calibrationSpeed)
 		{
 		case FAST:
-			return 12;
+			return 16;
 		case SLOW:
-			return 18;
+			return 22;
 		case VERY_SLOW:
-			return 25;
+			return 30;
 		}
-		return 12;
+		return 16;
 	}
 
 	struct Message
