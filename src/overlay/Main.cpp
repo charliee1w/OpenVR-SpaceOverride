@@ -70,7 +70,15 @@ static auto UpdateApplicationRefreshRate() -> void
     try {
         auto hmd_properties = VrTrackedDeviceProperties::FromDeviceIndex(vr::k_unTrackedDeviceIndex_Hmd);
         hmd_properties.CheckConnection();
-        g_hmd_refresh_rate = hmd_properties.GetFloat(vr::Prop_DisplayFrequency_Float);
+        // Bounded for the same reason the driver bounds it (GetCachedDisplayHz: hz >= 1.0).
+        // GetFloat throws on a property error, so the realistic failure is already covered by
+        // the catch below — but a driver reporting success with 0 would give 1e9/0 = inf and
+        // then UB in the uint64_t cast that paces the frame loop, i.e. a hung overlay.
+        const float hz = hmd_properties.GetFloat(vr::Prop_DisplayFrequency_Float);
+        if (std::isfinite(hz) && hz >= 1.0f && hz <= 1000.0f)
+            g_hmd_refresh_rate = hz;
+        else
+            printf("Implausible display frequency %.3f reported; keeping %.1f Hz\n", hz, g_hmd_refresh_rate);
     }
     catch (std::exception& ex) {
         printf("%s\n\n", ex.what());

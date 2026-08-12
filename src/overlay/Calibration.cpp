@@ -38,7 +38,15 @@ CalibrationContext CalCtx;
 // was actually measured from one that was carried over or defaulted, which the value
 // alone cannot show (a kept 0.996 and a measured 0.996 look identical).
 static double g_lastScaleStdErr = -1.0;
+// N3-c: the cluster-corrected companion to g_lastScaleStdErr. The naive OLS error treats
+// every sample as independent; samples arrive in bursts at a station, so it is optimistic.
+// This is the honest number. -1 when not computed.
+static double g_lastScaleStdErrEff = -1.0;
 static const char *g_lastScaleSource = "unknown";
+// Declared here rather than beside StationTracker below: the scale solve needs the station
+// partition to compute the effective sample size, and it runs earlier in this file.
+static std::vector<int> g_sampleStation;   // parallel to the sample vector
+static int g_stationCount = 0;
 static double g_lastAxisVariance = 0.0;
 static size_t g_lastSampleTarget = 0;
 static bool g_lastEarlyFinish = false;
@@ -148,6 +156,12 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  scale_src=" << g_lastScaleSource
 		<< "  scale_stderr_pct=" << std::setprecision(3)
 		<< (g_lastScaleStdErr >= 0.0 ? g_lastScaleStdErr * 100.0 : -1.0)
+		// scale_stderr_pct is the naive OLS error and is optimistic -- it is what the
+		// MaxScaleStdErr gate still uses. scale_stderr_eff_pct applies the station design
+		// effect sqrt(n/K) and is the number to believe (N3-c). Log both so the gate can
+		// eventually be re-tuned against real data rather than a guess.
+		<< "  scale_stderr_eff_pct=" << std::setprecision(3)
+		<< (g_lastScaleStdErrEff >= 0.0 ? g_lastScaleStdErrEff * 100.0 : -1.0)
 		// Solved rotation, plus the pitch/roll tilt away from the expected flip. If
 		// tilt_* scatters run to run it is solver noise (and worth constraining); if it
 		// repeats, it is a real tilt between the two spaces and must be kept.
@@ -239,6 +253,46 @@ static bool HmdTrackerEq(const protocol::SetHmdTracker &a, const protocol::SetHm
 static bool OneEuroEq(const protocol::OneEuroParams &a, const protocol::OneEuroParams &b)
 {
 	return ApproxEq(a.minCutoff, b.minCutoff) && ApproxEq(a.beta, b.beta) && ApproxEq(a.dCutoff, b.dCutoff);
+}
+
+// Mirror of the driver's SetHmdTracker acceptance rules (ServerTrackedDeviceProvider.cpp, "IPC
+// input boundary"). The protocol has no NACK — HandleRequest answers ResponseSuccess whether or
+// not the driver accepted the message — so a message the driver would reject must be caught HERE,
+// before SendBlocking and before the g_appliedHmd cache records it as applied. Without this
+// pre-flight, one rejection became permanent silent divergence: the UI showed the new calibration
+// (and enable/disable state, which rides the same message) while the driver kept the old one, and
+// the dedupe suppressed every retry for the life of the overlay process.
+static bool SendableQuat(const vr::HmdQuaternion_t &q)
+{
+	if (!std::isfinite(q.w) || !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z))
+		return false;
+	const double n = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+	return std::fabs(1.0 - n) <= 1e-3;
+}
+
+static bool SendableVec(const vr::HmdVector3d_t &v, double maxAbs)
+{
+	if (!std::isfinite(v.v[0]) || !std::isfinite(v.v[1]) || !std::isfinite(v.v[2]))
+		return false;
+	return std::fabs(v.v[0]) <= maxAbs && std::fabs(v.v[1]) <= maxAbs && std::fabs(v.v[2]) <= maxAbs;
+}
+
+static bool SendableScale(double s)
+{
+	return std::isfinite(s) && s >= 0.5 && s <= 2.0;
+}
+
+static const char *HmdTrackerRequestProblem(const protocol::SetHmdTracker &cmd)
+{
+	if (!SendableQuat(cmd.offsetRotation) || !SendableQuat(cmd.calibrationRotation))
+		return "offset/calibration rotation is not a finite unit quaternion";
+	if (!SendableVec(cmd.offsetTranslation, 10.0) || !SendableVec(cmd.calibrationTranslation, 10.0))
+		return "offset/calibration translation not finite or >10 m";
+	if (!SendableScale(cmd.calibrationScale) || !SendableScale(cmd.hmdScale))
+		return "calibrationScale/hmdScale outside [0.5, 2.0]";
+	if (!std::isfinite(cmd.predictionTime))
+		return "predictionTime not finite";
+	return nullptr;
 }
 
 void InitCalibrator()
@@ -594,6 +648,19 @@ static double g_lastScaleSpread = 0.0;
 
 static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale, double priorScale)
 {
+	// Unreachable from the live path (readyToSolve cannot fire on an empty set), but
+	// CalibrateRotation beside this one was hardened for exactly this shape of degenerate input
+	// (finding 4) and these were not. Scale is the one quantity the runtime can never
+	// re-estimate, so the safe answer on no data is the prior, never a NaN.
+	if (samples.empty())
+	{
+		CalCtx.Log("No samples to fit headset scale - keeping the previous value.\n");
+		g_lastScaleSource = (priorScale != 1.0) ? "kept_no_samples" : "default_no_samples";
+		g_lastScaleStdErr = -1.0;
+		g_lastScaleStdErrEff = -1.0;
+		return priorScale;
+	}
+
 	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
 	for (auto &sample : samples)
 		centroid += rotation * sample.target.trans;
@@ -622,6 +689,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 		CalCtx.Log(buf);
 		g_lastScaleSource = (priorScale != 1.0) ? "kept_low_spread" : "default_low_spread";
 		g_lastScaleStdErr = -1.0;
+		g_lastScaleStdErrEff = -1.0;
 		return priorScale;
 	}
 
@@ -670,6 +738,40 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	}
 
 	g_lastScaleStdErr = scaleStdErr;
+
+	// N3-c fix: the standard error above assumes all nObs rows are independent. They are not.
+	// Samples are collected in bursts while the user holds still at a station, so within a
+	// station they are near-duplicates of each other -- the intra-cluster correlation is close
+	// to 1. Under rho ~ 1 the effective sample size is the number of *stations* K, not the
+	// number of samples n, and the variance inflation (design effect) is n/K. So the honest
+	// standard error is sqrt(n/K) times the naive one. That is the ~7x optimism N3-c records:
+	// the formula reported 0.2% on a 0.160 m fit that was ~3% wrong.
+	//
+	// This corrects the number that is *reported*. It deliberately does NOT move the
+	// MaxScaleStdErr gate onto it: that threshold (0.012) was tuned against the naive value,
+	// and switching the gate would tighten acceptance by the same sqrt(n/K) -- silently
+	// rejecting most calibrations on a live rig with no replay harness to check the new
+	// operating point against. Re-tuning the gate needs a few sessions of logged
+	// scale_stderr_eff_pct to pick a threshold from data. The spread gate above remains the
+	// primary check, as the comment there already says.
+	{
+		int stations = 0;
+		if (g_sampleStation.size() == samples.size() && !g_sampleStation.empty())
+		{
+			std::set<int> distinct(g_sampleStation.begin(), g_sampleStation.end());
+			stations = (int)distinct.size();
+		}
+		else
+		{
+			stations = g_stationCount;   // fallback: partition unavailable or stale
+		}
+
+		if (stations >= 1 && std::isfinite(scaleStdErr) && samples.size() > (size_t)stations)
+			g_lastScaleStdErrEff = scaleStdErr
+				* std::sqrt((double)samples.size() / (double)stations);
+		else
+			g_lastScaleStdErrEff = std::isfinite(scaleStdErr) ? scaleStdErr : -1.0;
+	}
 
 	if (!(scaleStdErr <= MaxScaleStdErr))
 	{
@@ -760,6 +862,9 @@ static double SecondAxisVariance(const std::vector<Sample> &samples)
 
 static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &samples, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
 {
+	if (samples.empty())
+		return Eigen::Vector3d::Zero();
+
 	Eigen::Vector3d accum = Eigen::Vector3d::Zero();
 
 	for (auto &sample : samples)
@@ -770,6 +875,11 @@ static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &sampl
 
 static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eigen::Vector3d &hmdToTargetPos, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
 {
+	// NaN, not 0: this feeds the `!(rmsError <= 0.1)` accept gate (finding 3), and a zero
+	// residual would read as a perfect fit and be saved.
+	if (samples.empty())
+		return std::numeric_limits<double>::quiet_NaN();
+
 	double accum = 0;
 
 	for (auto &sample : samples)
@@ -922,6 +1032,23 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	if (g_appliedHmdKnown && HmdTrackerEq(g_appliedHmd, req.setHmdTracker))
 		return;
 
+	// The driver would reject this whole message (and still answer ResponseSuccess). Don't send
+	// it and above all don't cache it as applied — the driver keeps its current state, and the
+	// next scan retries if the values change. Logged once per distinct offender, not at scan rate.
+	if (const char *problem = HmdTrackerRequestProblem(req.setHmdTracker))
+	{
+		static protocol::SetHmdTracker lastRejected{};
+		static bool rejectedKnown = false;
+		if (!rejectedKnown || !HmdTrackerEq(lastRejected, req.setHmdTracker))
+		{
+			std::cerr << "NOT sending SetHmdTracker (driver would reject it): " << problem
+				<< " — driver keeps its previous calibration/state" << std::endl;
+			lastRejected = req.setHmdTracker;
+			rejectedKnown = true;
+		}
+		return;
+	}
+
 	Driver.SendBlocking(req);
 	g_appliedHmd = req.setHmdTracker;
 	g_appliedHmdKnown = true;
@@ -985,6 +1112,29 @@ void ComputeRelativeOffset(CalibrationContext &ctx, const std::vector<Sample> &s
 	// remount cutoff is neither clearly noise nor clearly a remount, so it gets blended
 	// in (as before) but is called out in the log instead of passing silently.
 	static const double kNoiseFloorM = 0.012;
+
+	// Deferred tracker-swap reset (see BeginSamplingPhase). Landing it here means the old
+	// tracker's average survives in the profile until this run produces a replacement, so an
+	// abandoned calibration can no longer destroy a good lever arm. Must run before `prior` is
+	// read, or the old tracker's offset would be blended into the new one.
+	//
+	// Keyed on the persisted lever OWNER (ctx.leverSerial), not on a process-local flag: the
+	// flag scheme desynchronised from ctx.trackerSerial, which BeginSamplingPhase overwrites
+	// immediately and any SaveProfile persists. An abandoned swap run then stored serial B next
+	// to tracker A's average — on relaunch the flag was gone, serials matched, and a later B
+	// calibration blended A's mount point in as prior. Conversely, swapping back to A before
+	// solving left the flag armed and wiped A's own average. The owner serial travels with the
+	// data it describes, so both directions resolve correctly regardless of restarts.
+	if (ctx.validRelativeOffset && !ctx.leverSerial.empty() && !ctx.trackerSerial.empty()
+		&& ctx.leverSerial != ctx.trackerSerial)
+	{
+		ctx.Log("Target tracker changed - starting a fresh head-tracker offset average.\n");
+		ctx.relativeTranslation = { 0, 0, 0 };
+		ctx.validRelativeOffset = false;
+		ctx.leverSamples = 0;
+	}
+	// This solve produced a measurement on the current tracker: it owns the average from here.
+	ctx.leverSerial = ctx.trackerSerial;
 
 	const Eigen::Vector3d prior(
 		ctx.relativeTranslation.v[0], ctx.relativeTranslation.v[1], ctx.relativeTranslation.v[2]);
@@ -1226,8 +1376,8 @@ struct StationTracker
 	int index = -1;
 };
 static StationTracker g_station;
-static std::vector<int> g_sampleStation;   // parallel to the sample vector
-static int g_stationCount = 0;
+// g_sampleStation / g_stationCount are declared near the top of this file — the scale solve
+// needs them and runs earlier.
 // High-water mark of the readiness bar, so it never runs backwards (display only).
 static double g_readyFracHigh = 0.0;
 // The split-half check re-solves the rotation twice and the solve is O(N^2) in samples,
@@ -1334,17 +1484,40 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	// check only catches this by coincidence, if the new lever arm happens to differ
 	// enough). Keying the reset on serial identity catches every swap, not just distant
 	// ones.
-	if (ctx.validRelativeOffset && !ctx.trackerSerial.empty() && newTrackerSerial != ctx.trackerSerial)
+	//
+	// Two things this must NOT do, both fixed 2026-08-06:
+	//
+	// (a) It must not clear the stored offset *here*. WriteProfile only emits rel_*/lever_n
+	//     under `if (ctx.validRelativeOffset)` (Configuration.cpp:221) while `validProfile`
+	//     stays true, and SaveProfile is reachable before this run ever solves — from overlay
+	//     shutdown (Main.cpp:365) and three UI toggles (UserInterface.cpp:168/181/229). Wiping
+	//     at the start of sampling therefore *permanently* deleted a good lever arm from both
+	//     the registry and the JSON mirror if the user swapped trackers and then closed the
+	//     overlay mid-calibration. The swap is instead detected at solve time, where the
+	//     replacement measurement actually exists: ComputeRelativeOffset compares the current
+	//     tracker against ctx.leverSerial — the persisted owner of the stored average — so no
+	//     transient state here has to survive an abandoned run or an overlay restart.
+	//
+	// (b) An empty serial is not a swap. GetDeviceSerial discards the ETrackedPropertyError
+	//     and returns "" when the property read fails, which is routine for a device that has
+	//     just woken or re-enumerated. Storing "" would also break serial-based target
+	//     recovery below and the connected-tracker check in UserInterface.cpp.
+	if (!newTrackerSerial.empty())
 	{
-		ctx.Log("Target tracker changed - starting a fresh head-tracker offset average.\n");
-		ctx.relativeTranslation = { 0, 0, 0 };
-		ctx.validRelativeOffset = false;
-		ctx.leverSamples = 0;
+		if (ctx.validRelativeOffset && !ctx.leverSerial.empty()
+			&& newTrackerSerial != ctx.leverSerial)
+		{
+			ctx.Log("Target tracker changed - the head-tracker offset average will restart"
+				" when this calibration solves.\n");
+		}
+		// Keep the live serial current — target recovery and the UI check both key off it.
+		// The stored average stays attributed to ctx.leverSerial until a solve replaces it.
+		ctx.trackerSerial = newTrackerSerial;
 	}
-	ctx.trackerSerial = newTrackerSerial;
 
 	char buf[256];
-	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
+	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n",
+		newTrackerSerial.empty() ? ctx.trackerSerial.c_str() : newTrackerSerial.c_str(), targetID);
 	ctx.Log(buf);
 
 	ResetAndDisableOffsets(targetID);
@@ -1361,6 +1534,7 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_lastEarlyFinish = false;
 	g_lastScaleSource = "unknown";
 	g_lastScaleStdErr = -1.0;
+	g_lastScaleStdErrEff = -1.0;
 	g_lastAxisVariance = 0.0;
 	g_lastSplitHalfDeg = -1.0;
 	g_lastStationCount = 0;

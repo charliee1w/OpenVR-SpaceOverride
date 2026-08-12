@@ -51,18 +51,31 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	auto obj = arr[0].get<picojson::object>();
 
+	// picojson's get<T>() is guarded only by assert(), so under NDEBUG a missing or wrongly-typed
+	// key does not fail — it reads the wrong union member and returns an indeterminate value.
+	// These required keys were the last ones still read unchecked, and this file is the
+	// documented recovery path when the registry is empty, so a truncated or hand-edited mirror
+	// used to yield an indeterminate calibration instead of a catchable error.
+	auto reqDouble = [&](const char *key) -> double {
+		if (!obj[key].is<double>())
+			throw std::runtime_error(std::string("profile key '") + key + "' missing or not a number");
+		return obj[key].get<double>();
+	};
+
+	if (!obj["target_tracking_system"].is<std::string>())
+		throw std::runtime_error("profile key 'target_tracking_system' missing or not a string");
 	ctx.targetTrackingSystem = obj["target_tracking_system"].get<std::string>();
 
 	if (obj["hmd_serial"].is<std::string>())
 		ctx.hmdSerial = obj["hmd_serial"].get<std::string>();
 	if (obj["tracker_serial"].is<std::string>())
 		ctx.trackerSerial = obj["tracker_serial"].get<std::string>();
-	ctx.calibratedRotation(0) = obj["roll"].get<double>();
-	ctx.calibratedRotation(1) = obj["yaw"].get<double>();
-	ctx.calibratedRotation(2) = obj["pitch"].get<double>();
-	ctx.calibratedTranslation(0) = obj["x"].get<double>();
-	ctx.calibratedTranslation(1) = obj["y"].get<double>();
-	ctx.calibratedTranslation(2) = obj["z"].get<double>();
+	ctx.calibratedRotation(0) = reqDouble("roll");
+	ctx.calibratedRotation(1) = reqDouble("yaw");
+	ctx.calibratedRotation(2) = reqDouble("pitch");
+	ctx.calibratedTranslation(0) = reqDouble("x");
+	ctx.calibratedTranslation(1) = reqDouble("y");
+	ctx.calibratedTranslation(2) = reqDouble("z");
 
 	if (obj["scale"].is<double>())
 		ctx.calibratedScale = obj["scale"].get<double>();
@@ -84,9 +97,17 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (ctx.hmdScale <= 0.0)
 		ctx.hmdScale = 1.0;
 
-	ctx.enableNative = obj["native"].get<bool>();
-	ctx.fallbackToSlam = obj["fallbackSlam"].get<bool>();
-	ctx.enableAngularVelocity = obj["eAngVel"].get<bool>();
+	// Optional, not required: these three keys are fork additions, so a profile saved by
+	// upstream or an early fork build legitimately lacks them. Treating "missing because older
+	// schema" like "missing because truncated" threw here and wiped an otherwise fully valid
+	// calibration (both stores share the schema, so both candidates failed and LoadProfile fell
+	// through to Clear()). Defaults match CalibrationContext's initialisers.
+	auto optBool = [&](const char *key, bool def) -> bool {
+		return obj[key].is<bool>() ? obj[key].get<bool>() : def;
+	};
+	ctx.enableNative = optBool("native", false);
+	ctx.fallbackToSlam = optBool("fallbackSlam", true);
+	ctx.enableAngularVelocity = optBool("eAngVel", false);
 
 	if (obj["continuousSync"].is<bool>())
 		ctx.continuousSync = obj["continuousSync"].get<bool>();
@@ -112,7 +133,11 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	loadOneEuro("headFilter", ctx.headFilterParams, { 2.0, 0.5, 1.0 });
 	loadOneEuro("driftFilter", ctx.driftFilterParams, { 1.0, 0.4, 0.85 });
 
-	if (obj["rel_qw"].is<double>())
+	// All seven or none: rel_qw alone used to admit the block and the remaining six were then
+	// read unchecked.
+	if (obj["rel_qw"].is<double>() && obj["rel_qx"].is<double>() && obj["rel_qy"].is<double>()
+		&& obj["rel_qz"].is<double>() && obj["rel_tx"].is<double>() && obj["rel_ty"].is<double>()
+		&& obj["rel_tz"].is<double>())
 	{
 		ctx.relativeRotation.w = obj["rel_qw"].get<double>();
 		ctx.relativeRotation.x = obj["rel_qx"].get<double>();
@@ -125,11 +150,18 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		// Absent in profiles saved before this field existed; those still carry exactly
 		// one prior lever-arm observation, same as ComputeRelativeOffset's own fallback.
 		ctx.leverSamples = obj["lever_n"].is<double>() ? (int) obj["lever_n"].get<double>() : 1;
+		// Which tracker the average belongs to. Legacy profiles predate the field and were
+		// written when the two serials could not legitimately differ, so attribute the
+		// average to the profile's tracker — the same assumption those files were saved under.
+		ctx.leverSerial = obj["lever_serial"].is<std::string>()
+			? obj["lever_serial"].get<std::string>()
+			: ctx.trackerSerial;
 	}
 	else
 	{
 		ctx.validRelativeOffset = false;
 		ctx.leverSamples = 0;
+		ctx.leverSerial = "";
 	}
 
 	if (obj["calibration_speed"].is<double>())
@@ -229,6 +261,9 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 		profile["rel_tz"].set<double>(ctx.relativeTranslation.v[2]);
 		double leverSamples = ctx.leverSamples;
 		profile["lever_n"].set<double>(leverSamples);
+		// The average's owner — may lag tracker_serial when a swap run was started but never
+		// solved, which is exactly the state the solve-time reset needs to see.
+		profile["lever_serial"].set<std::string>(ctx.leverSerial);
 	}
 
 	double speed = (int) ctx.calibrationSpeed;

@@ -9,6 +9,159 @@ unreasonable precision from the person doing it.
 
 ---
 
+## Audit hardening, the correction rate bound, and the estimator extraction (2026-08-07 → 2026-08-10)
+
+Everything in this entry shipped as the matched pair deployed 2026-08-10 (driver `87115DA2…`,
+overlay `F3878598…`) and was exercised over two clean 68-minute sessions. Deep detail lives in
+the workspace `AUDIT.md` (findings 11–25) and `Agents.md` (N1-h row, cr10 list); this is the
+summary of what changed and why.
+
+**Estimator extraction.** The fusion/override decision path moved out of
+`ServerTrackedDeviceProvider.cpp` into `pose_est::ProcessHmdFrame`
+(`PoseEstimator.cpp`/`PoseMath.h`) — a pure function of its inputs: no SteamVR calls, no locks,
+no `GetRaw`. This is what made the offline replay harness possible (the Python replay reproduces
+the driver's own diagnostics to print quantisation). Reviewed line-by-line against the
+pre-refactor source; faithful.
+
+**Correction rate bound (N1-h).** A covariance reset used to re-anchor yaw and translation in a
+single frame — measured up to a 17.9° view step in 27.5 ms, because one 3-DoF position sample
+cannot separate yaw from translation and the publish gate only tests position. The EKF's
+*correction channel* is now rate-bounded (`kMaxCorrYawRate` ≈ 15 °/s, `kMaxCorrTransRate`
+0.5 m/s) — the right place because no real head motion passes through it. A `corr_slew=` counter
+in the heartbeat records every engagement. Offline A/B over the captured burst: peak correction
+rate 649 → 14.9 °/s, single-frame steps >1° five → zero; bit-identical output on a clean session.
+
+**Full-codebase audit remediation.** The pass that read every hand-written line (`AUDIT.md`)
+fixed twelve findings, the most important being: a `DriverPose_t` size mismatch now **passes
+poses through unmodified and logs once** instead of silently dropping every pose in the system;
+the pose-hook depth counter is exception-safe (a throw used to pin it and leave the driver
+inert with no log line); detours catch everything and publish the original pose rather than
+unwinding into `vrserver`; the IPC server length-checks reads, uses atomic thread flags, joins
+on `joinable()`, and value-initialises pipe instances; driver-side IPC setters validate their
+inputs and reject-and-log; One-Euro clamps are NaN-safe; `LeaveStandby` resets the estimators;
+the capture sink is size-capped and the rolling log rolls over; `ParseProfile` type-checks
+required keys instead of reading indeterminate values under `NDEBUG`, and treats the three
+fork-added booleans as optional so an older-but-valid profile no longer parses as corrupt.
+
+**The ten 2026-08-08 review fixes** (session `5dc11699`), including: slew/covariance honesty,
+fall-through `headVel` inertness in fusion, `lever_serial` persisted so a tracker-swap reset
+survives an abandoned run, the capture flush ordered under both mutexes, `Role_Sync` device
+rows captured post-correction (pre-correction rows made offline head-vs-body subtraction report
+the entire correction as "body drift"), the diag epoch decoupled from CSV open,
+`ComposeWorldPose` unified, the R9 diagnostic gated on `fusionDiag`, and session-stats gated by
+mode.
+
+**Overlay pre-flight for `SetHmdTracker`.** The audit added driver-side rejection of malformed
+IPC — but the protocol has no NACK, and the overlay's applied-state cache (the C8 anti-spam
+dedupe) records a sent message as applied. One driver-side rejection therefore became
+*permanent silent divergence*: the UI showed the new calibration while the driver kept the old
+one, and the dedupe suppressed every retry for the life of the overlay process. The overlay now
+mirrors the driver's acceptance rules and refuses to send (with a logged reason) anything the
+driver would reject.
+
+*Operational note, same evening:* **Continuous sync was enabled in the overlay UI** (profile
+`continuousSync: true`) — the first activation of the pre-existing slam-sync path on this rig.
+The overlay enrolls every non-lighthouse, non-reference tracked device (in practice: the
+Standable virtual pucks) so body devices receive the live correction and no longer diverge from
+the corrected view. No code changed for this; recorded here because session logs from 2026-08-10
+onward show `SetSlamSync` enrollment lines that no earlier log contains.
+
+## Review fixes, honest calibration error, and two diagnostics (2026-08-06)
+
+**Pose path (driver).**
+
+- A tracker swap could **permanently delete the head-tracker lever arm**. The offset was cleared at
+  the *start* of sampling, but the profile stays valid, so any save before the run solved — overlay
+  shutdown, or three UI toggles — wrote the cleared value to both the registry and the JSON mirror.
+  The reset is now deferred until a calibration actually solves.
+- An **empty serial read** (routine after a device wakes) was treated as a tracker swap, firing that
+  wipe and storing an empty serial that broke target recovery.
+- The tracker position filter was fed **unpredicted** samples on the fusion path and
+  **velocity-predicted** samples on the override path. Fusion falls through to override when SLAM is
+  briefly invalid, so a dropout flipped the filter's input convention frame to frame and injected a
+  `velocity × prediction` step into filter state — which then arrived at the estimator as a
+  measurement. Prediction and the One-Euro head filter are now inert on that fall-through, matching
+  what fusion mode was already documented to do.
+- The heartbeat reported estimator state whenever fusion mode was set, but the estimator only runs
+  when fusion is set *and* native mode is off — so native mode printed an untouched filter as though
+  it were wildly unconverged.
+- The diagnostic CSV's time origin was stamped after the file opened, so the first rows after a
+  mid-session re-enable carried the previous epoch.
+
+**Calibration (overlay).** The reported scale standard error assumed every sample was independent.
+Samples arrive in bursts while you hold still at a station, so the effective count is the number of
+stations, not samples. The log now carries a cluster-corrected figure beside the original; measured
+inflation is ~2.3×. The acceptance gate deliberately still reads the original value — it was tuned
+against it — and moving it needs data, not a guess.
+
+**Diagnostics (log-only, nothing reads them, pose path untouched).**
+
+- Angular-velocity frame check: OpenVR documents the axis-angle encoding but never states the frame,
+  and this driver assumed both conventions in different places. The check scores both against a
+  reference differentiated from successive world rotations, counting only samples where the two
+  actually disagree. **Result: device-local**, by 1.75× over ~84k discriminating samples — the
+  existing tracker-cache read was right.
+- The slam-sync device set is now logged. It never was, which made "my body drifts relative to my
+  view" undiagnosable — a lighthouse device wrongly in that set gets the correction applied twice.
+- The heartbeat logs total absorbed SLAM-origin motion beside the correction magnitude, so a large
+  correction can be read as explained rather than alarming.
+- Head-vs-body lighthouse poses moved into unified capture (`Rec_Device`); the short-lived
+  `body_diag_*.csv` sink is gone.
+
+## Capture schema rev2 — the file can now explain itself (2026-08-06)
+
+Parsing the first real capture (43 min, 90.7 MB) showed the framing and the estimator-input
+contract were sound — `Rec_Config` covers `PoseConfig` 12/12, `Rec_Frame` covers
+`HmdInput`/`TrackerInput`, nothing truncated, no non-finite values — but that a reader still could
+not answer basic questions about the file. `kFormatVersion` stays 1; this is append-only, so rev1
+readers parse rev2 files and the rev2 reader parses the existing rev1 capture (both verified).
+
+- **`Rec_Event` was never written.** `CaptureEvent` existed with zero call sites, so a capture had
+  no events at all and could not explain its own 32 s frame gap. Now wired into `LogSession` — the
+  one funnel every `LOG()` reaches — and placed *before* the session-log handle check, so the
+  mirror cannot go silent because a different sink failed to open. That coupling is the same
+  two-lifecycle mistake that shipped `body_diag` broken.
+- **`Rec_DeviceInfo`** (id → serial, model, device class). `Rec_Device` carried only the OpenVR
+  enumeration index, which is assigned in connection order and is not stable across restarts: the
+  first capture held 16 devices that could not be told apart, not even a base station from a foot
+  puck. Emitted once per device **per file**, keyed on a new `CaptureGeneration()` rather than a
+  bool — re-opening the sink starts a new file, and that file has to describe its own devices.
+- **`enabled` + `trackerID` appended to `Rec_Config`**, with `trackerID` added to the change test:
+  it is not a `PoseConfig` field, so a tracker swap previously kept the old `configSeq` and a
+  replay would have mis-attributed the new tracker's samples. `enabled` is 1 by construction there
+  (the record is only emitted from the enabled path) — the disable *transition* is carried by the
+  `Rec_Event` mirror, and the schema now says so instead of leaving it to be discovered.
+- **`frameIndex` documented**: it counts records written, not hook calls, so its contiguity proves
+  file integrity and *not* sampling completeness. The first capture was contiguous 0..84016 while
+  averaging 32.6 Hz against a `displayHz` of 80.
+
+Reader/validator: `archive/n2a-capture-reader/sorcap_check.py` (outside this repo).
+
+## Unified capture (2026-08-06)
+
+Machine-readable sink `capture_<ts>.sor` (format in `include/shared/CaptureFormat.h`) records the
+**estimator inputs** — not derived metrics — so offline replay can compute disp/corr/sig/NIS/gate
+without another driver release cycle.
+
+- One lifecycle: `SetCaptureEnabled(desired)` only (no Open/Close pair half-wired to one call site).
+- `Rec_Config` on change + capture re-open; `Rec_Frame` every HMD tick **before** `ProcessHmdFrame`;
+  `Rec_Device` for head/sync/lh lighthouse poses pre-correction (B6); `Rec_Event` for correlation.
+- Forward-compatible framing (`type`/`len`); append-only schema rules in the header.
+- Human session log stays. `fusion_diag_*.csv` still dual-writes for now (transitional).
+- Recording I/O for N2-a offline harness is now the capture file; a reader is still open.
+
+## Offline pose path (N2-a Phase 1, 2026-08-05)
+
+The HMD fusion/override decision path (EKF update, jump gate, last-good hold,
+bounded reconvergence, override rebuild) lives in `pose_est::ProcessHmdFrame`
+(`PoseEstimator.cpp` / `PoseMath.h`). The MinHook pose callback only gathers
+inputs under locks and calls that function. Offline tools can call the same
+entry with synthetic timestamps and recorded samples — no SteamVR runtime
+required for the estimator itself. Live recording is `capture_*.sor`; an offline reader/replay
+CLI is still open.
+
+---
+
 ## Fusion mode
 
 A second way to align a SLAM-tracked headset with lighthouse devices, selectable in

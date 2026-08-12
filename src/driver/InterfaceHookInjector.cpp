@@ -12,6 +12,48 @@
 static std::atomic<bool> g_driverShuttingDown{ false };
 static thread_local uint32_t g_poseHookDepth = 0;
 
+// Scope guard for the re-entrancy depth. The counter used to be raised and lowered by bare
+// ++/--, so anything that threw between them (CaptureWrite appends to a std::string, so
+// std::bad_alloc is reachable on the pose path) left the depth pinned above zero for the life
+// of that thread — after which every pose on it silently took the pass-through branch and the
+// driver was inert with no log line and no counter moving.
+struct PoseHookDepthGuard
+{
+	PoseHookDepthGuard() { ++g_poseHookDepth; }
+	~PoseHookDepthGuard() { --g_poseHookDepth; }
+	PoseHookDepthGuard(const PoseHookDepthGuard&) = delete;
+	PoseHookDepthGuard& operator=(const PoseHookDepthGuard&) = delete;
+};
+
+// A DriverPose_t size mismatch means SteamVR changed the struct under us. Passing the pose
+// through unmodified is the only safe response: the previous `return;` DROPPED it, so a future
+// SteamVR would have produced total tracking loss for every device, silently, with the driver
+// the last place anyone would look. Logged once — this fires per pose callback, so an
+// unthrottled log would be the second failure.
+static void LogPoseStructMismatchOnce(uint32_t got)
+{
+	static std::atomic<bool> logged{ false };
+	bool expected = false;
+	if (logged.compare_exchange_strong(expected, true))
+		LOG("DriverPose_t size mismatch: SteamVR passed %u, this driver was built against %u. "
+			"Passing all poses through UNMODIFIED — SpaceOverride is inert until rebuilt.",
+			got, (uint32_t)sizeof(vr::DriverPose_t));
+}
+
+// The pose path can throw (the guard comment above names CaptureWrite's std::bad_alloc), and an
+// exception that unwinds out of the detour crosses into vrserver frames that have no handler —
+// std::terminate with the user in the headset. The detours therefore catch everything, publish
+// the ORIGINAL pose (the local copy may be half-rewritten at the throw point), and log once.
+// Per-frame, not sticky: the next callback runs the full path again.
+static void LogPoseHookExceptionOnce()
+{
+	static std::atomic<bool> logged{ false };
+	bool expected = false;
+	if (logged.compare_exchange_strong(expected, true))
+		LOG("Exception escaped the pose path; affected frames publish their ORIGINAL pose "
+			"unmodified. Capture/diagnostics may be incomplete. Logged once.");
+}
+
 void SetDriverShuttingDown(bool shuttingDown)
 {
 	g_driverShuttingDown.store(shuttingDown, std::memory_order_release);
@@ -34,7 +76,11 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 		return;
 	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
+	{
+		LogPoseStructMismatchOnce(unPoseStructSize);
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
+	}
 
 	// Depth guard against detour re-entry. The original need was a
 	// GetRawTrackedDevicePoses call inside the override (since removed); the guard
@@ -45,13 +91,23 @@ static void DetourTrackedDevicePoseUpdated005(void* _this, uint32_t unWhichDevic
 		return;
 	}
 
-	++g_poseHookDepth;
+	PoseHookDepthGuard depthGuard;
 	auto pose = newPose;
-	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
+	bool publish;
+	try
+	{
+		publish = g_server.HandleDevicePoseUpdated(unWhichDevice, pose);
+	}
+	catch (...)
+	{
+		LogPoseHookExceptionOnce();
+		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+	if (publish)
 	{
 		TrackedDevicePoseUpdatedHook005.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
 	}
-	--g_poseHookDepth;
 }
 
 static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
@@ -62,7 +118,11 @@ static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevic
 		return;
 	}
 	if (sizeof(vr::DriverPose_t) != unPoseStructSize)
+	{
+		LogPoseStructMismatchOnce(unPoseStructSize);
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
+	}
 
 	if (g_poseHookDepth > 0)
 	{
@@ -70,13 +130,23 @@ static void DetourTrackedDevicePoseUpdated006(void* _this, uint32_t unWhichDevic
 		return;
 	}
 
-	++g_poseHookDepth;
+	PoseHookDepthGuard depthGuard;
 	auto pose = newPose;
-	if (g_server.HandleDevicePoseUpdated(unWhichDevice, pose))
+	bool publish;
+	try
+	{
+		publish = g_server.HandleDevicePoseUpdated(unWhichDevice, pose);
+	}
+	catch (...)
+	{
+		LogPoseHookExceptionOnce();
+		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+	if (publish)
 	{
 		TrackedDevicePoseUpdatedHook006.originalFunc(_this, unWhichDevice, pose, unPoseStructSize);
 	}
-	--g_poseHookDepth;
 }
 
 static void *DetourGetGenericInterface(void* _this, const char *pchInterfaceVersion, vr::EVRInitError *peError)

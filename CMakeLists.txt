@@ -76,6 +76,7 @@ target_link_libraries(OpenVR-SpaceOverride
 add_library(driver_spaceoverride SHARED
     "src/driver/Main.cpp"
     "src/driver/ServerTrackedDeviceProvider.cpp"
+    "src/driver/PoseEstimator.cpp"
     "src/driver/IPCServer.cpp"
     "src/driver/InterfaceHookInjector.cpp"
     "src/driver/Hooking.cpp"

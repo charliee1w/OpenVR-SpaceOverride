@@ -4,6 +4,7 @@
 
 #include "Protocol.h"
 
+#include <atomic>
 #include <thread>
 #include <set>
 #include <mutex>
@@ -45,11 +46,17 @@ private:
 
 	std::thread mainThread;
 
-	bool running = false;
-	bool stop = false;
+	// Written by the server thread, read by the caller of Stop(): plain bools here were a data
+	// race, and `running` in particular gated the join. Stop() could observe it still false
+	// (the thread had not reached its first statement), return without joining, and leave a
+	// joinable std::thread to be destroyed — std::terminate(), inside vrserver.
+	std::atomic<bool> running{ false };
+	std::atomic<bool> stop{ false };
 
 	std::set<PipeInstance *> pipes;
-	HANDLE connectEvent;
+	// Same cross-thread pattern as running/stop, and the wake Stop() depends on: a stale read
+	// here skips the SetEvent and leaves join() waiting on a thread parked in an INFINITE wait.
+	std::atomic<HANDLE> connectEvent{ nullptr };
 
 	ServerTrackedDeviceProvider *driver;
 };

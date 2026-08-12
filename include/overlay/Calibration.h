@@ -37,6 +37,14 @@ struct CalibrationContext
 	// alongside it (see Configuration.cpp) so the running average actually
 	// accumulates across sessions instead of resetting every relaunch.
 	int leverSamples = 0;
+	// Serial of the physical tracker the rel_*/lever_n average was measured on. Persisted with
+	// it, and deliberately SEPARATE from trackerSerial: trackerSerial tracks the live target and
+	// is overwritten the moment sampling starts, while this field only advances when a solve
+	// actually produces a measurement. The swap-detecting reset in ComputeRelativeOffset keys on
+	// this, so an abandoned run can neither contaminate the average across a tracker swap (the
+	// old volatile-flag scheme lost the pending reset when the overlay closed, while SaveProfile
+	// had already persisted the new serial) nor wipe it when the user swaps back before solving.
+	std::string leverSerial;
 
 	std::string targetTrackingSystem;
 
@@ -102,6 +110,7 @@ struct CalibrationContext
 		relativeTranslation = { 0, 0, 0 };
 		validRelativeOffset = false;
 		leverSamples = 0;
+		leverSerial = "";
 		targetTrackingSystem = "";
 		hmdSerial = "";
 		trackerSerial = "";
