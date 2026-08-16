@@ -97,6 +97,20 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (ctx.hmdScale <= 0.0)
 		ctx.hmdScale = 1.0;
 
+	// How many solves are averaged into hmdScale, and which headset that average describes.
+	// Both optional: profiles written before scale averaging existed carry a single measured
+	// scale, which is exactly one prior observation — the same fallback lever_n uses below.
+	// Attributing a legacy average to the profile's own hmd_serial matches the assumption
+	// those files were saved under, when the two serials could not legitimately differ.
+	ctx.hmdScaleSamples = obj["hmdscale_n"].is<double>()
+		? (int) obj["hmdscale_n"].get<double>()
+		: (ctx.hmdScale != 1.0 ? 1 : 0);
+	ctx.hmdScaleSerial = obj["hmdscale_serial"].is<std::string>()
+		? obj["hmdscale_serial"].get<std::string>()
+		: ctx.hmdSerial;
+	if (ctx.hmdScaleSamples < 0)
+		ctx.hmdScaleSamples = 0;
+
 	// Optional, not required: these three keys are fork additions, so a profile saved by
 	// upstream or an early fork build legitimately lacks them. Treating "missing because older
 	// schema" like "missing because truncated" threw here and wiped an otherwise fully valid
@@ -224,6 +238,15 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["scale"].set<double>(ctx.calibratedScale);
 	profile["targetModelScale"].set<double>(ctx.targetModelScale);
 	profile["hmdScale"].set<double>(ctx.hmdScale);
+	// Companions to hmdScale, persisted for the same reason lever_n is: an average that
+	// resets every relaunch never averages anything. Unconditional, unlike the rel_* block
+	// below — hmdScale itself is written unconditionally, so gating its sample count would
+	// let the two drift apart across an abandoned run.
+	{
+		double hmdScaleSamples = ctx.hmdScaleSamples;
+		profile["hmdscale_n"].set<double>(hmdScaleSamples);
+	}
+	profile["hmdscale_serial"].set<std::string>(ctx.hmdScaleSerial);
 	// Save time, so LoadProfile can tell which store holds the newer calibration when
 	// the two disagree. Written as a plain unix timestamp; absent in legacy profiles,
 	// which are then treated as older than anything carrying a stamp.

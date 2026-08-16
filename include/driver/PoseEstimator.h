@@ -49,6 +49,23 @@ struct PoseConfig
 	double hmdScale = 1.0;
 
 	bool headFilterEnabled = false;
+	// KalmanFilterXYZ pre-filter on the tracker position. False bypasses it entirely, which in
+	// override mode removes ~125 ms of lag from the published head pose. See the settings read
+	// in ServerTrackedDeviceProvider::Init for why this defaults off.
+	bool trackerFilterEnabled = false;
+	// One-Euro on the drift/correction transform (UpdateDrift). Smoothing of the correction,
+	// not of head motion -- real head motion does not pass through this channel.
+	bool driftFilterEnabled = true;
+	// One-Euro on the PUBLISHED head angular velocity. Does not move the pose, but games that
+	// extrapolate from vecAngularVelocity feel it.
+	bool headVelFilterEnabled = true;
+	// SAFETY BOUND, not smoothing: GatePublish's jump hold and reconvergence slew. Off means a
+	// far-away pose candidate is snapped to rather than approached -- the teleport this exists
+	// to prevent. Only engages while reconverging, so it costs nothing in steady state.
+	bool publishSlewEnabled = true;
+	// SAFETY BOUND, not smoothing: the N1-h correction rate limit. Off restores the measured
+	// 17.87-degree single-frame view yaw step on covariance reset. Only engages on re-anchor.
+	bool corrRateLimitEnabled = true;
 
 	double SlamScale() const
 	{

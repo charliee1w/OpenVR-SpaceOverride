@@ -94,6 +94,45 @@ inline double SanitizeOneEuro(double v, double lo, double fallback)
 
 } // namespace
 
+// Every filter and bound on the pose path that can be switched at runtime, in one table.
+//
+// Init() and RunFrame() both walk this list, so a new filter is wired into the startup read AND
+// the live poll by adding one row -- the two cannot drift apart, which is the failure this table
+// exists to prevent. Keys live under driver_spaceoverride/ in steamvr.vrsettings and are polled
+// once a second, so every one of these takes effect without a SteamVR restart.
+//
+// The defaults are not uniform, deliberately:
+//
+//   trackerFilter   OFF. KalmanFilterXYZ on the tracker position. In OVERRIDE mode that filtered
+//                   position IS the published head pose, so this is view lag. Shipped constants
+//                   (Q=2.5e-7, R=1.0e-5, A=4.0) settle to K=0.146 -- ~125 ms at a 50 Hz pose
+//                   rate -- and the adaptive term only opens past a 2*sqrt(R) = 6.3 mm per-frame
+//                   dead-band. A 20 degree nod moves a helmet-top tracker ~7.7 cm, ~3.8 mm per
+//                   frame: under the dead-band, so ordinary nodding takes the full lag while
+//                   large motions punch through. User-reported 2026-08-15. What it suppresses is
+//                   sub-millimetre, and HW1's second base station halved that while leaving the
+//                   cost unchanged. AUDIT finding 12 flagged it; N4-e step (1) is to drop it.
+//   driftFilter     ON. One-Euro on the correction transform. Smooths the correction, not head
+//                   motion, so it costs no view latency -- but off lets observation noise into
+//                   the published transform.
+//   headVelFilter   ON. One-Euro on the PUBLISHED angular velocity only. The pose is identical
+//                   either way; only games that extrapolate from vecAngularVelocity feel it.
+//   publishSlew     ON. SAFETY BOUND. GatePublish's jump hold and reconvergence slew. Off means
+//                   a far candidate is snapped to instead of approached -- the teleport the gate
+//                   exists to prevent. Engages only while reconverging, so it is free at rest.
+//   corrRateLimit   ON. SAFETY BOUND. The N1-h correction rate limit. Off restores the measured
+//                   17.87-degree single-frame view yaw step on covariance reset. No real head
+//                   motion passes through the correction channel, so this adds latency to
+//                   nothing the user does.
+const ServerTrackedDeviceProvider::FilterToggle
+ServerTrackedDeviceProvider::kFilterToggles[5] = {
+	{ "trackerFilter", &ServerTrackedDeviceProvider::trackerFilterEnabled, false },
+	{ "driftFilter",   &ServerTrackedDeviceProvider::driftFilterEnabled,   true  },
+	{ "headVelFilter", &ServerTrackedDeviceProvider::headVelFilterEnabled, true  },
+	{ "publishSlew",   &ServerTrackedDeviceProvider::publishSlewEnabled,   true  },
+	{ "corrRateLimit", &ServerTrackedDeviceProvider::corrRateLimitEnabled, true  },
+};
+
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriverContext)
 {
 	TRACE("ServerTrackedDeviceProvider::Init()");
@@ -127,7 +166,21 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		serr = vr::VRSettingsError_None;
 		bool d = vr::VRSettings()->GetBool("driver_spaceoverride", "fusionDiag", &serr);
 		fusionDiag = (serr == vr::VRSettingsError_None) ? d : false;
+
+		// Every switchable filter/bound, read through one table so Init and RunFrame cannot
+		// drift apart. See kFilterToggles above for what each one does and why its default is
+		// what it is.
+		for (const FilterToggle &t : kFilterToggles)
+		{
+			serr = vr::VRSettingsError_None;
+			const bool v = vr::VRSettings()->GetBool("driver_spaceoverride", t.key, &serr);
+			this->*(t.field) = (serr == vr::VRSettingsError_None) ? v : t.defaultOn;
+		}
+
 	}
+	for (const FilterToggle &t : kFilterToggles)
+		LOG("filter %s: %s%s", t.key, this->*(t.field) ? "ON" : "OFF",
+			(this->*(t.field) == t.defaultOn) ? " (default)" : " (overridden)");
 	LOG("mode: %s", fusionMode
 		? "FUSION (SLAM source, tracker observes correction, slam-step cancel)"
 		: "OVERRIDE (tracker source, classic)");
@@ -184,6 +237,27 @@ void ServerTrackedDeviceProvider::RunFrame()
 			ResetEstimators(/*clearLastGood=*/false, /*clearSlamSync=*/false);
 		}
 		LOG("mode switched -> %s (live, via overlay)", fusionMode ? "FUSION" : "OVERRIDE");
+	}
+
+	for (const FilterToggle &t : kFilterToggles)
+	{
+		serr = vr::VRSettingsError_None;
+		const bool want = vr::VRSettings()->GetBool("driver_spaceoverride", t.key, &serr);
+		if (serr != vr::VRSettingsError_None || want == this->*(t.field))
+			continue;
+
+		{
+			// Same lock discipline as the fusion toggle: these feed PoseConfig, which a pose
+			// callback reads under the shared lock, so flipping one bare would tear an in-flight
+			// frame. Reset the filter states too -- re-enabling a filter that still holds the
+			// state from before it was bypassed would step the pose by however far the head
+			// moved in between.
+			std::unique_lock<std::shared_mutex> lock(configMutex);
+			this->*(t.field) = want;
+			poseState.trackerFilter.reset();
+			poseState.headVel.reset();
+		}
+		LOG("filter %s -> %s (live, via settings)", t.key, want ? "ON" : "OFF");
 	}
 
 	serr = vr::VRSettingsError_None;
@@ -987,6 +1061,11 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			// Snapshot config for the pure estimator (no locks inside ProcessHmdFrame).
 			pose_est::PoseConfig cfg;
 			cfg.fusionMode = fusionMode;
+			cfg.trackerFilterEnabled = trackerFilterEnabled;
+			cfg.driftFilterEnabled = driftFilterEnabled;
+			cfg.headVelFilterEnabled = headVelFilterEnabled;
+			cfg.publishSlewEnabled = publishSlewEnabled;
+			cfg.corrRateLimitEnabled = corrRateLimitEnabled;
 			cfg.native = hmdTracker.native;
 			cfg.slamFallback = hmdTracker.slamFallback;
 			cfg.enableAngularVelocity = hmdTracker.enableAngularVelocity;

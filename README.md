@@ -58,6 +58,23 @@ Two toggles at the top of the overlay's **Settings** tab:
 
 These apply **live — no SteamVR restart and no re-calibration.** The overlay writes them through SteamVR's settings store and the driver re-reads them as it runs, so you can also set them by hand in `steamvr.vrsettings`. Shipped defaults are in `dev-resources/driver/resources/settings/default.vrsettings`, and both default to off, so the driver behaves like upstream unless you ask otherwise.
 
+### Filters and bounds
+
+Every filter on the pose path can be switched independently, in the same settings block and on the same live poll. There is no overlay control for these yet — edit `steamvr.vrsettings` by hand.
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `trackerFilter` | **off** | Kalman pre-filter on the tracker's position. In **override** mode this filtered position *is* your published head pose. |
+| `driftFilter` | on | One-Euro smoothing of the SLAM↔lighthouse correction. Smooths the correction, not your head. |
+| `headVelFilter` | on | One-Euro on the *published* angular velocity. Your pose is identical either way; only apps that extrapolate between frames feel it. |
+| `publishSlew` | on | **Safety bound.** Approaches a far-away pose candidate instead of snapping to it. |
+| `corrRateLimit` | on | **Safety bound.** Caps how fast the correction itself may move. |
+
+`trackerFilter` defaults **off**, which is a change from earlier builds. With the shipped constants its gain settles to ~0.15, which is roughly **125 ms of lag on head position**, and its adaptive term only opens up past about **6 mm of movement per frame**. A normal nod moves a helmet-mounted tracker just under that threshold, so nodding took the full lag while large fast motions passed through — which feels like the headset resisting you rather than being smoothed. What it removes in exchange is well under a millimetre of noise. If you preferred the old behaviour, set it back to `true`; it applies immediately.
+
+> [!WARNING]
+> The bottom two are **limiters, not smoothing**, and neither adds any latency to real head motion. Turning off `publishSlew` lets the view teleport when the pose jumps. Turning off `corrRateLimit` restores single-frame view rotations that were measured at up to 17.9° — enough to be genuinely unpleasant. If something feels laggy, these are not the cause.
+
 Switching mid-session is safe by construction: whichever estimator takes over starts from a clean state and re-converges, and the publish gate bounds the transition, so the pose slews rather than snapping.
 
 Your calibration is shared by both modes and does not need to be redone when you switch. The rest of the Settings tab still requires a re-calibration, as the tab itself notes.
@@ -74,7 +91,11 @@ Your calibration is shared by both modes and does not need to be redone when you
 Worth knowing:
 
 - **Turn and tilt, don't just pan.** If every sample looks like the same rotation, calibration will say your movement is too uniform and keep collecting.
+- **Cover ground early, and cover it in every direction.** This is the single biggest lever on calibration quality. The scale of your headset's tracking space can only be measured by *moving through* space, and its precision improves in direct proportion to how much ground you covered — head rotation alone cannot determine it at all. Walk to the far corners in the first part of the run, pausing at each. If your coverage is lopsided the coaching now names the direction it needs ("thin left-to-right", "thin front-to-back", "thin vertically") rather than just asking for more.
 - **Slow beats fast, and samples are only taken while you are still.** Samples captured during fast head rotation *or* fast translation are discarded: a wireless headset's pose and a lighthouse tracker's pose arrive with different latency, so a pair captured mid-motion pairs two instants that are not the same instant, and that skew is baked into the offset. The motion that works is move -> pause -> look around -> repeat; the on-screen coaching says which one is currently blocking.
+- **The bar filling is the floor, not the finish.** Once coverage is met the run keeps collecting for as long as you keep improving it, up to 20 more seconds, and the hint changes to "keep moving to sharpen the scale fit". Earlier builds solved the instant the bar filled, which reliably produced calibrations at the bare minimum coverage. Stopping when the bar fills now costs you accuracy.
+- **Headset scale is averaged across calibrations.** It is the one calibrated quantity that cannot be re-estimated while you play, so a single unlucky run used to be frozen in for the whole session. Each new measurement is now blended into a running average over your last several calibrations, which reduced its run-to-run scatter about elevenfold on the rig this was measured on. The average resets by itself if you change headset or if a measurement moves by more than 3%, so a genuinely changed setup is still tracked. Practical consequence: **a few good calibrations beat one perfect one**, and one bad run no longer ruins your session.
+- **A brief tracking dropout no longer ruins the run.** Losing sight of a base station for a moment costs a few samples; only a sustained loss of about two seconds aborts. Recovered dropouts are noted in the log.
 - **A bad calibration is refused rather than saved.** If the residual comes out too high, calibration aborts and your previous profile is restored. Re-run at a slower **Calibration Speed**; a rushed pass is the most common cause of a bad result.
 - **Edit Calibration** nudges the saved transform by hand; **Remove Calibration** clears it. Re-calibrating properly beats hand-editing in almost every case.
 
@@ -83,11 +104,13 @@ Worth knowing:
 This fork has been used on exactly one rig:
 
 - Quest Pro over Virtual Desktop
-- A single lighthouse base station
+- Lighthouse base stations — one until 2026-08-15, two since
 - Vive Tracker 3.0 as the head tracker
-- Index controllers and lighthouse body trackers
+- Index controllers and lighthouse body trackers, plus Tundra trackers
 
-**Nothing else has been verified here** — including Pico, ALVR, Steam Link, Quest Link / Air Link, wired and DisplayPort headsets, multi-base-station setups, and Tundra trackers. Upstream supports a considerably wider range and carries a compatibility table for it; that table is deliberately **not** reproduced here, because none of it was checked against this fork's changes. Untested does not mean broken — the override path is upstream's and should behave as it always has — but this fork cannot vouch for it, and fusion in particular has comparatively few real sessions behind it. Treat fusion as experimental.
+**Nothing else has been verified here** — including Pico, ALVR, Steam Link, Quest Link / Air Link, and wired or DisplayPort headsets. Upstream supports a considerably wider range and carries a compatibility table for it; that table is deliberately **not** reproduced here, because none of it was checked against this fork's changes. Untested does not mean broken — the override path is upstream's and should behave as it always has — but this fork cannot vouch for it, and fusion in particular has comparatively few real sessions behind it. Treat fusion as experimental.
+
+A second base station was added on 2026-08-15 and measured before and after. At the timescales the estimator works over, it cut the tracker's correlated position error by about **42%**, and the improvement grows the longer the interval — the signature of a drift-like error being replaced by more frequent optical fixes. It did **not** change anything about the SLAM↔lighthouse relationship: the correction still starts each session displaced by half a metre or more and still wanders during play, because those are properties of the headset's own tracking, not of lighthouse coverage. **More base stations improve the tracker; they do not remove the need for this driver.**
 
 ## Logs and diagnostics
 
@@ -96,6 +119,10 @@ Written automatically to `%LOCALAPPDATA%\OpenVR-SpaceOverride\logs\`:
 - `spaceoverride_driver.log` — rolling log across sessions
 - `session_*.log` — one per SteamVR start; older ones are pruned automatically
 - `fusion_diag_*.csv` — per-frame diagnostics, only while **Diagnostic log (CSV)** is on
+- `calibration.log` — one line per calibration, successful **or** failed. Failed runs record `result=abort` with the reason and the coverage they reached, so a run that died leaves a trace instead of vanishing.
+- `calsamples_*.jsonl` — the raw pose pairs a calibration was solved from, one file per solve (~30 KB). These make a calibration re-solvable offline, which is what allows a change to the solver to be measured rather than merely believed.
+
+The calibration line is worth knowing how to read. `hmdScale` is the value that ships; `hmdscale_raw` is what this run alone measured, and `hmdscale_n` is how many runs are in the average. **`hmdscale_raw` jumping around while `hmdScale` stays put is the averaging working, not a fault.** `scale_src` says whether the run actually measured scale (`measured*`) or kept the previous value (`kept_*`), and `spread_m` is the coverage that determined which — below 0.15 m, scale cannot be measured at all.
 
 Session logs record the active mode and mode switches, tracker good/bad transitions, gate and hold events, correction resets, periodic heartbeats, and an end-of-session summary. **If you report a problem, attach the session log** — it is far more useful than a description, and it is the authority on what the driver actually did on the build you are running.
 
@@ -109,7 +136,13 @@ Leave the CSV off for normal use; it is only for investigating tracking quality.
 The headset lost or reset its own tracking space. Re-calibrate.
 
 **Calibration feels subtly off.**
-Re-run at a slower calibration speed, moving smoothly through varied head orientations.
+Re-run at a slower calibration speed, moving smoothly through varied head orientations — and cover more ground than feels necessary, especially early in the run. Misalignment that gets *worse the further you walk from where you calibrated* is a scale error specifically; the cure is more positional coverage, not more samples. Because scale is now averaged across runs, two or three good calibrations will pull it in even if one of them was mediocre.
+
+**My head feels sluggish or "sticky", like something resists small movements — nodding especially.**
+Check `trackerFilter` in `steamvr.vrsettings`. It pre-filters the tracker's position, and in override mode that filtered position *is* your head pose, adding roughly 125 ms of lag to movements below about 6 mm per frame — which is exactly where ordinary nodding falls, while larger motions pass through unaffected. It ships **off** since 2026-08-16; if you are on an older build or have set it to `true`, set it to `false`. The change applies immediately with no restart.
+
+**Which mode am I actually in?**
+The session log says, at startup and on every mode switch, and every heartbeat line carries `mode=F` (fusion) or `mode=O` (override). Note that if `fusionMode` is absent from `steamvr.vrsettings` entirely you get the shipped default, which is **override** — an absent key is not the same as "unchanged from last session". The `mode` column in `fusion_diag_*.csv` is **not** a mode indicator; that file only exists while fusion is running.
 
 **My head tracker looks like it flew far away in SteamVR.**
 Deliberate — see [Two modes](#two-modes). Its published pose is parked so apps don't bind it as a body joint; the driver still uses the real pose.
@@ -172,7 +205,13 @@ Relative to upstream, this fork adds:
 - **Head tracker quashing** so applications don't bind it as a body joint.
 - **Automatic session logging** with pruning of old session files, plus the optional per-frame diagnostic CSV.
 - **Calibration profile backup** alongside the registry entry.
-- **Calibration sample quality gating** — rejection of samples taken during fast head rotation or translation, a spread requirement before headset scale is fitted at all, and live on-screen coaching for the motion the solver still needs.
+- **Calibration sample quality gating** — rejection of samples taken during fast head rotation or translation, a spread requirement before headset scale is fitted at all, and live on-screen coaching for the motion the solver still needs, naming the direction coverage is weakest in.
+- **Headset scale averaged across calibrations** — bounded running average with automatic reset on a headset change or a step too large to be noise. Scale is the only calibrated quantity the runtime cannot re-estimate, so a single bad run used to be frozen in for the session.
+- **Coverage-driven finish** — calibration keeps sampling while coverage is still improving instead of solving the moment the minimum is met, because scale precision is proportional to how much ground was covered.
+- **A solve on independent observations** — samples are collapsed to one average per distinct pose, so the estimator's independence assumption holds instead of being corrected for after the fact.
+- **Tracking-loss tolerance during calibration** — a momentary dropout costs a few samples rather than the whole run.
+- **A calibration record that includes failures**, plus raw sample dumps that make a calibration re-solvable offline.
+- **Individually switchable filters and bounds** — every filter on the pose path can be turned off at runtime, including the tracker position pre-filter, which is now off by default.
 - **Cross-thread synchronization** between IPC configuration writes and pose callbacks, so a configuration change cannot tear an in-flight pose.
 - **This README**, rewritten for the fork, correcting upstream statements that fusion mode invalidates.
 

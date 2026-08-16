@@ -2,6 +2,12 @@
 	"driver_spaceoverride": {
 		"loadPriority": 9999,
 		"fusionMode": false,
-		"fusionDiag": false
+		"fusionDiag": false,
+
+		"trackerFilter": false,
+		"driftFilter": true,
+		"headVelFilter": true,
+		"publishSlew": true,
+		"corrRateLimit": true
 	}
 }

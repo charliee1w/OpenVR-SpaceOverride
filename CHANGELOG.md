@@ -9,6 +9,96 @@ unreasonable precision from the person doing it.
 
 ---
 
+## Calibration accuracy: scale pooling, plateau finish, station-collapsed solve (2026-08-15)
+
+Built after the second base station arrived (HW1) and a measurement pass over 84 logged
+calibrations. `protocol::Version` is unchanged at 7 — nothing here crosses the IPC boundary.
+
+**`hmdScale` is now averaged across calibrations.** Scale is the one calibrated quantity the
+runtime can never re-estimate: fusion applies it directly and the EKF carries yaw + translation
+with no scale state, so whatever a run draws is frozen until the next calibration. Measured over
+14 consecutive solves it scattered **σ 0.757%, peak-to-peak 2.63%**, against a per-solve error
+bar averaging 0.202% — the solves disagree **3.8× more than they claim to**, so no gate tuned
+against that error bar can catch it. The remedy is the scheme already applied to the lever arm:
+bounded running average (cap 8), owner-serial keyed so a headset change resets it, and a 3%
+step reset (~4σ) so a genuinely changed setup is tracked rather than blended. Only runs that
+actually *measured* scale are pooled — every `kept_*`/`default_*` path returns the prior, and
+pooling one would blend the average into itself. Replayed over the real history
+(`archive/n2a-capture-reader/hw1_scale_pool_replay.py`): shipped-value σ **0.757% → 0.068%**,
+11.1×, which at 2 m from the origin is **15.1 mm → 1.4 mm** of permanent error. That is a
+reduction in scatter about the pooled mean, not evidence the mean is unbiased.
+
+**Runs no longer finish at the bare minimum.** Solving fired the instant all three coverage
+gates cleared, which pinned 12 of the last 14 calibrations between 0.150 and 0.199 m of spread
+against a 0.150 m gate — and scale precision goes as 1/spread. The run now keeps collecting
+while coverage is still improving, finishing 4 s after the last meaningful gain, capped at 20 s
+extra. Gates are unchanged and still authoritative; only the solve is delayed.
+
+**The solve runs on one averaged observation per station.** Samples arrive in bursts while the
+user holds still, so within a station they are near-duplicates with intra-cluster correlation
+~1 — which `EstimateHmdSpaceScale` already knew and patched over by inflating the reported error
+by √(n/K) after the fact (N3-c). Collapsing makes the independence assumption *true* instead of
+corrected-for: within-station noise averages down, the error bar becomes meaningful by
+construction, and the O(N²) pair loops shrink ~45×. **Shipped without offline validation, at the
+user's explicit direction** — there was no calibration replay harness to validate against, which
+is why this build adds one.
+
+**Raw sample dumps.** Every solve writes `calsamples_*.jsonl` — the raw pose pairs, station
+index and metadata. `Agents.md` calls the missing replay harness "the binding constraint on
+estimator work" for the driver; the calibration solver had the identical gap and no equivalent.
+Solver changes were previously inspectable but not measurable.
+
+**A pairwise-baseline scale estimator, logged only.** `|Δref| / |Δtarget|` over long baselines
+recovers scale with rotation and translation cancelling exactly, instead of competing with six
+nuisance parameters in one SVD. Median over pairs ≥ 20 cm. Emitted as `scale_pair=` for
+comparison against `hmdscale_raw=` over real runs; **not applied** — changing the estimator and
+the observation set in the same build would make a bad outcome uninterpretable.
+
+**A single bad frame no longer kills a run.** `CollectSample` aborted the whole calibration —
+state cleared, every sample discarded — the first time either pose came back invalid, and logged
+only to the in-VR message list. Brief line-of-sight losses are routine. It now coasts, aborting
+only after 2 s of sustained loss, and reports the dropped-frame count.
+
+**Failed calibrations are recorded.** `calibration.log` held successful solves only, so an
+abandoned or aborted run left no trace at all — a user reporting repeated failures produced a log
+showing nothing but clean successes. Aborts now write `result=abort reason=…` with the coverage
+reached.
+
+**Coaching names the deficient direction.** "Cover more of your play space" is not actionable
+for someone who has already walked a line across the room. The hint now names the weakest room
+axis when coverage is lopsided by 4× or more.
+
+**Every filter and bound on the pose path is now individually switchable at runtime.** Five keys
+under `driver_spaceoverride/` in `steamvr.vrsettings`, polled once a second, so all of them take
+effect without a SteamVR restart. They are driven from one table (`kFilterToggles`) that both the
+startup read and the live poll walk, so adding a filter later cannot wire up one and miss the
+other. Defaults are deliberately not uniform:
+
+| key | default | what it is |
+|-----|---------|-----------|
+| `trackerFilter` | **off** | `KalmanFilterXYZ` on tracker position — in override mode this *is* the published head pose |
+| `driftFilter` | on | One-Euro on the correction transform; smooths the correction, not head motion |
+| `headVelFilter` | on | One-Euro on published angular velocity only; the pose is identical either way |
+| `publishSlew` | on | **Safety bound** — `GatePublish` jump hold and reconvergence slew |
+| `corrRateLimit` | on | **Safety bound** — the N1-h correction rate limit |
+
+The last two are limiters, not smoothing, and are called out as such in the code: turning off
+`publishSlew` means a far-away candidate is snapped to rather than approached, and turning off
+`corrRateLimit` restores the measured 17.87° single-frame view yaw step on covariance reset.
+Neither adds latency to real head motion, so neither is a candidate for "it feels laggy". Toggling
+any filter resets the affected filter state, so re-enabling one cannot step the pose by however
+far the head moved while it was bypassed.
+
+**Why `trackerFilter` defaults off.** `KalmanFilterXYZ` pre-filters the tracker
+position, and in override mode that filtered position *is* the published head pose. With the
+shipped constants the gain settles to K = 0.146 — **~125 ms of lag** at a 50 Hz pose rate — and
+the adaptive term only opens past a **6.3 mm per-frame dead-band**. A 20° nod moves a helmet-top
+tracker ~7.7 cm, ~3.8 mm per frame: under the dead-band, so ordinary nodding takes the full lag
+while large motions punch through. User-reported as "something prevents me from nodding".
+`AUDIT.md` finding 12 flagged this lag and deferred it; N4-e step (1) is "drop
+`KalmanFilterXYZ`". HW1 then halved the noise it suppresses while leaving its cost unchanged.
+Live-pollable, so the old behaviour is one toggle away without a restart.
+
 ## Audit hardening, the correction rate bound, and the estimator extraction (2026-08-07 → 2026-08-10)
 
 Everything in this entry shipped as the matched pair deployed 2026-08-10 (driver `87115DA2…`,

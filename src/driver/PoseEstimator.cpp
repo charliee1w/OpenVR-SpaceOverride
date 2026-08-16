@@ -70,8 +70,8 @@ bool ShouldHoldForJump(const PoseState& state, const double newPos[3], double dt
 
 // Returns false when the pose was replaced by a last-good hold / slew (caller
 // skips drift bookkeeping for this frame).
-bool GatePublish(vr::DriverPose_t& pose, double displayHz, double linSpeed,
-	PoseState& state, PoseDiag& diag, const PoseClock& clock)
+bool GatePublish(vr::DriverPose_t& pose, const PoseConfig& cfg, double displayHz,
+	double linSpeed, PoseState& state, PoseDiag& diag, const PoseClock& clock)
 {
 	vr::HmdQuaternion_t candRot;
 	double candPos[3];
@@ -104,7 +104,12 @@ bool GatePublish(vr::DriverPose_t& pose, double displayHz, double linSpeed,
 	const double kMaxCatchupSpeed = 3.0;
 	const double kMaxCatchupAngSpeed = 3.0;
 	const double kReconvergeRotTau = 0.10;
-	if (state.lastGoodHmd.valid && (state.reconverging || ShouldHoldForJump(state, candPos, dtPos)))
+	// cfg.publishSlewEnabled off means a distant candidate is published as-is rather than
+	// approached. That is a snap, i.e. exactly the teleport this gate exists to prevent -- it is
+	// a safety bound, not smoothing, and it costs nothing in steady state because it only
+	// engages while reconverging or holding for a jump.
+	if (cfg.publishSlewEnabled && state.lastGoodHmd.valid
+		&& (state.reconverging || ShouldHoldForJump(state, candPos, dtPos)))
 	{
 		const double dx = candPos[0] - state.lastGoodHmd.position[0];
 		const double dy = candPos[1] - state.lastGoodHmd.position[1];
@@ -303,7 +308,11 @@ bool FusionEkfUpdate(PoseState& state, PoseDiag& diag, const PoseConfig& cfg, co
 	// motion, and slewing it would reintroduce the jump it exists to remove.
 	const double kMaxCorrYawRate = 0.26;    // rad/s, ~15 deg/s
 	const double kMaxCorrTransRate = 0.50;  // m/s
-	const bool limitSlew = ekf.valid && dt > 0.0;   // cold-start anchor is exempt
+	// Bypassable, but this is a SAFETY BOUND rather than smoothing: no real head motion passes
+	// through the correction channel, so the limit adds no latency to anything the user does.
+	// Turning it off restores the measured 17.87-degree single-frame view yaw step on covariance
+	// reset (N1-h). Cold-start anchor is exempt either way.
+	const bool limitSlew = cfg.corrRateLimitEnabled && ekf.valid && dt > 0.0;
 
 	if (!ekf.valid || (rTheta * rTheta / Stheta) <= gateTheta)
 	{
@@ -445,8 +454,16 @@ void UpdateDrift(PoseState& state, PoseDiag& diag, const PoseConfig& cfg, const 
 
 	double dt = FilterStep(state.drift.lastUpdate, state.drift.valid, clock.now, clock.freq);
 
-	vr::HmdQuaternion_t newRot = state.drift.rotationFilter.filter(instRot, dt);
-	vr::HmdVector3d_t newTrans = state.drift.translationFilter.filter(instTrans, dt);
+	// One-Euro on the correction channel. Bypassable: this smooths the drift transform, not head
+	// motion (the head's own rotation is in rawRot and its translation in scaledRaw), so turning
+	// it off makes the correction track its observation more closely rather than making the view
+	// laggier -- but it also lets observation noise straight into the published transform.
+	vr::HmdQuaternion_t newRot = cfg.driftFilterEnabled
+		? state.drift.rotationFilter.filter(instRot, dt)
+		: instRot;
+	vr::HmdVector3d_t newTrans = cfg.driftFilterEnabled
+		? state.drift.translationFilter.filter(instTrans, dt)
+		: instTrans;
 	state.drift.rotation = newRot;
 	state.drift.translation = newTrans;
 	state.drift.valid = true;
@@ -640,8 +657,14 @@ bool ProcessHmdFrame(
 		if (trackerPoseOk)
 		{
 			vr::HmdQuaternion_t trackerRef = quaternionNormalize(cfg.calibrationRotation * tracker.rotation);
-			vr::HmdVector3d_t filteredTrackerPos = state.trackerFilter.translation.update({
-				tracker.position[0], tracker.position[1], tracker.position[2] });
+			// Bypassed when the pre-filter is off. In fusion this feeds the EKF's observation
+			// rather than the view, so the cost here is a coloured innovation (N4-e) rather than
+			// visible lag -- but N4-e's step (1) wants it gone from this path too.
+			const vr::HmdVector3d_t rawTrackerVec = {
+				tracker.position[0], tracker.position[1], tracker.position[2] };
+			vr::HmdVector3d_t filteredTrackerPos = cfg.trackerFilterEnabled
+				? state.trackerFilter.translation.update(rawTrackerVec)
+				: rawTrackerVec;
 			vr::HmdVector3d_t refPos = quaternionRotateVector(cfg.calibrationRotation, filteredTrackerPos.v);
 			refPos.v[0] += cfg.calibrationTranslation.v[0];
 			refPos.v[1] += cfg.calibrationTranslation.v[1];
@@ -729,7 +752,7 @@ bool ProcessHmdFrame(
 		}
 
 		ApplyDrift(pose, cfg, state);
-		GatePublish(pose, displayHz, linSpeed, state, diag, clock);
+		GatePublish(pose, cfg, displayHz, linSpeed, state, diag, clock);
 		return true;
 	}
 
@@ -755,11 +778,17 @@ bool ProcessHmdFrame(
 			rawTrackerPos[2] += trackerVel[2] * predSec;
 		}
 
-		vr::HmdVector3d_t filteredTrackerPos = state.trackerFilter.translation.update({
+		// OVERRIDE PATH: this filtered position becomes the published HEAD position, so the
+		// filter's lag is view lag. With the shipped constants that is ~125 ms below a 6.3 mm
+		// per-frame dead-band, which is where ordinary nodding lives. Off by default.
+		const vr::HmdVector3d_t rawTrackerVec = {
 			rawTrackerPos[0],
 			rawTrackerPos[1],
 			rawTrackerPos[2]
-		});
+		};
+		vr::HmdVector3d_t filteredTrackerPos = cfg.trackerFilterEnabled
+			? state.trackerFilter.translation.update(rawTrackerVec)
+			: rawTrackerVec;
 		double trackerPos[3] = {
 			filteredTrackerPos.v[0],
 			filteredTrackerPos.v[1],
@@ -836,8 +865,16 @@ bool ProcessHmdFrame(
 		{
 			double dtAng = FilterStep(state.headVel.lastUpdate, state.headVel.valid, clock.now, clock.freq);
 			if (state.headVel.valid)
-				headAngVel = state.headVel.filter.filter(
-					quaternionAngularVelocity(pose.qRotation, state.headVel.prevRotation, dtAng), dtAng);
+			{
+				const vr::HmdVector3d_t rawAngVel =
+					quaternionAngularVelocity(pose.qRotation, state.headVel.prevRotation, dtAng);
+				// Smooths the PUBLISHED angular velocity only -- the pose itself is untouched
+				// either way. Games that extrapolate from vecAngularVelocity between frames will
+				// feel this; the rendered pose will not move differently.
+				headAngVel = cfg.headVelFilterEnabled
+					? state.headVel.filter.filter(rawAngVel, dtAng)
+					: rawAngVel;
+			}
 			state.headVel.prevRotation = pose.qRotation;
 			state.headVel.valid = true;
 		}
@@ -867,7 +904,7 @@ bool ProcessHmdFrame(
 		pose.shouldApplyHeadModel = false;
 		pose.poseTimeOffset = 0;
 
-		if (!GatePublish(pose, displayHz, linSpeed, state, diag, clock))
+		if (!GatePublish(pose, cfg, displayHz, linSpeed, state, diag, clock))
 			return true;
 
 		if (rawValid)
@@ -941,7 +978,7 @@ bool ProcessHmdFrame(
 		else
 		{
 			ApplyDrift(pose, cfg, state);
-			GatePublish(pose, displayHz, linSpeed, state, diag, clock);
+			GatePublish(pose, cfg, displayHz, linSpeed, state, diag, clock);
 		}
 	}
 

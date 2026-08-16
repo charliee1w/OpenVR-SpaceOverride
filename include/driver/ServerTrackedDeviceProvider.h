@@ -115,6 +115,27 @@ private:
 
 	bool fusionMode = false;
 	bool fusionDiag = false;
+	// Every filter and bound on the pose path, individually switchable at runtime. Defaults
+	// match what each one is worth: the tracker pre-filter costs ~125 ms of view lag for
+	// sub-millimetre noise and is off; the two safety bounds are on. See kFilterToggles in
+	// ServerTrackedDeviceProvider.cpp, which is the single list Init() and RunFrame() both walk
+	// -- adding a filter there wires up both the initial read and the live poll.
+	bool trackerFilterEnabled = false;
+	bool driftFilterEnabled = true;
+	bool headVelFilterEnabled = true;
+	bool publishSlewEnabled = true;
+	bool corrRateLimitEnabled = true;
+
+	// The table itself is a class member rather than a file-static because its pointers-to-member
+	// address the private flags above. Defined in ServerTrackedDeviceProvider.cpp, where the
+	// per-toggle rationale lives.
+	struct FilterToggle
+	{
+		const char *key;
+		bool ServerTrackedDeviceProvider::*field;
+		bool defaultOn;
+	};
+	static const FilterToggle kFilterToggles[5];
 	LARGE_INTEGER settingsLastPoll = {};
 
 	double cachedDisplayHz = 90.0;

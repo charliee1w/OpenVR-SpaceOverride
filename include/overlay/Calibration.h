@@ -46,6 +46,24 @@ struct CalibrationContext
 	// had already persisted the new serial) nor wipe it when the user swaps back before solving.
 	std::string leverSerial;
 
+	// Number of calibrations averaged into hmdScale, and the headset that average belongs
+	// to. Scale is the ONE calibrated quantity the runtime can never re-estimate -- the EKF
+	// carries yaw and translation, no scale state -- so a bad draw is frozen for the whole
+	// session while orientation and translation self-heal. Measured on this rig over 14
+	// consecutive solves: sigma 0.757%, peak-to-peak 2.63%, against a per-solve error bar
+	// averaging 0.202%. The solves disagree 3.8x more than they claim to, which at 2 m from
+	// the origin is ~15 mm of permanent head-vs-body error and up to 53 mm between the best
+	// and worst run. Averaging is the same remedy already applied to the lever arm above,
+	// for the same reason, with the same bounded window.
+	//
+	// hmdScaleSerial is deliberately SEPARATE from hmdSerial, exactly as leverSerial is from
+	// trackerSerial and for the identical reason: BeginSamplingPhase overwrites the live
+	// serial the moment sampling starts, so keying the reset on it would let an abandoned
+	// run retarget the average. This field only advances when a solve actually produces a
+	// measurement, so it travels with the data it describes.
+	int hmdScaleSamples = 0;
+	std::string hmdScaleSerial;
+
 	std::string targetTrackingSystem;
 
 	std::string hmdSerial;
@@ -111,6 +129,8 @@ struct CalibrationContext
 		validRelativeOffset = false;
 		leverSamples = 0;
 		leverSerial = "";
+		hmdScaleSamples = 0;
+		hmdScaleSerial = "";
 		targetTrackingSystem = "";
 		hmdSerial = "";
 		trackerSerial = "";

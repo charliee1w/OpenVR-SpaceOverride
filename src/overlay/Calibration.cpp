@@ -43,6 +43,20 @@ static double g_lastScaleStdErr = -1.0;
 // This is the honest number. -1 when not computed.
 static double g_lastScaleStdErrEff = -1.0;
 static const char *g_lastScaleSource = "unknown";
+// Raw scale fitted by THIS run, before pooling (-1 when the run did not measure scale), and
+// what the pooling did with it. Kept so run-to-run scatter stays visible in the log exactly the
+// way lever_raw_mm keeps the lever arm's scatter visible -- an averaged number on its own hides
+// the very quantity that justifies averaging it. Declared here with the other log fields
+// because LogCalibrationResult reads them; PoolHmdScale below is what writes them.
+static double g_lastScaleRaw = -1.0;
+static const char *g_lastScalePoolAction = "none";
+// How many observations the solvers actually saw, after station collapsing, and the independent
+// pairwise-baseline scale estimate with the number of long baselines it was drawn from.
+// scale_pair is logged only -- it is a candidate replacement for the SVD fit, accumulating
+// evidence for a build before anything depends on it.
+static int g_lastSolveN = 0;
+static double g_lastScalePairwise = -1.0;
+static int g_lastScalePairCount = 0;
 // Declared here rather than beside StationTracker below: the scale solve needs the station
 // partition to compute the effective sample size, and it runs earlier in this file.
 static std::vector<int> g_sampleStation;   // parallel to the sample vector
@@ -106,6 +120,74 @@ static void SignedTiltDeg(const Eigen::Vector3d &eulerDeg, double &tiltX, double
 	tiltZ = std::asin(x) * 180.0 / EIGEN_PI;
 }
 
+// Shared by the success and failure records: resolve the log path, open for append, and write
+// the timestamp prefix. Returns false when the log is unavailable, in which case the caller
+// writes nothing rather than half a line.
+static bool OpenCalibrationLog(std::ofstream &out)
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return false;
+
+	std::string dir = std::string(localAppData) + "\\OpenVR-SpaceOverride\\logs";
+	CreateDirectoryA((std::string(localAppData) + "\\OpenVR-SpaceOverride").c_str(), nullptr);
+	CreateDirectoryA(dir.c_str(), nullptr);
+
+	out.open(dir + "\\calibration.log", std::ios::app);
+	if (!out)
+		return false;
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+
+	out << std::fixed
+		<< st.wYear << "-" << std::setw(2) << std::setfill('0') << st.wMonth << "-"
+		<< std::setw(2) << std::setfill('0') << st.wDay << " "
+		<< std::setw(2) << std::setfill('0') << st.wHour << ":"
+		<< std::setw(2) << std::setfill('0') << st.wMinute << ":"
+		<< std::setw(2) << std::setfill('0') << st.wSecond << std::setfill(' ');
+	return true;
+}
+
+// Records a calibration that did NOT produce a profile.
+//
+// calibration.log held successful solves only, so an abandoned or aborted run left no trace
+// whatsoever. A user reporting "calibration keeps failing" therefore produced a log containing
+// nothing but clean successes, and the failures had to be reconstructed from memory -- which is
+// exactly backwards, since the runs that die are the ones worth a record. Coverage is passed in
+// rather than read from file statics so this can be called from abort paths that run before,
+// during or after sampling.
+static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *result,
+	const char *reason, int accepted, int stations, double spreadM, double axisVar,
+	int rejAng, int rejLin, int droppedFrames)
+{
+	std::ofstream out;
+	if (!OpenCalibrationLog(out))
+		return;
+
+	out << std::setprecision(3)
+		<< "  result=" << result
+		<< "  reason=" << reason
+		<< "  accepted=" << accepted
+		<< "  stations=" << stations
+		<< "  target=" << g_lastSampleTarget
+		<< "  spread_m=" << spreadM
+		<< "  axis_var=" << std::setprecision(6) << axisVar
+		<< "  rej_ang=" << rejAng
+		<< "  rej_lin=" << rejLin
+		<< "  dropped=" << droppedFrames
+		<< "  speed=" << (int)ctx.calibrationSpeed
+		// The scale and lever the run was ABOUT to modify, so an abort can be told apart from
+		// a run that never got far enough to threaten them.
+		<< std::setprecision(5)
+		<< "  hmdScale=" << ctx.hmdScale
+		<< "  hmdscale_n=" << ctx.hmdScaleSamples
+		<< "  hmd=" << ctx.hmdSerial
+		<< "  tracker=" << ctx.trackerSerial
+		<< "\n";
+}
+
 static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm, double spreadM,
 	int accepted, int rejAng, int rejLin, int coverageCells)
 {
@@ -113,28 +195,11 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 	const double tiltX = g_lastTiltX;
 	const double tiltZ = g_lastTiltZ;
 
-	char localAppData[MAX_PATH] = {};
-	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
-	if (n == 0 || n >= MAX_PATH)
+	std::ofstream out;
+	if (!OpenCalibrationLog(out))
 		return;
 
-	std::string dir = std::string(localAppData) + "\\OpenVR-SpaceOverride\\logs";
-	CreateDirectoryA((std::string(localAppData) + "\\OpenVR-SpaceOverride").c_str(), nullptr);
-	CreateDirectoryA(dir.c_str(), nullptr);
-
-	SYSTEMTIME st;
-	GetLocalTime(&st);
-
-	std::ofstream out(dir + "\\calibration.log", std::ios::app);
-	if (!out)
-		return;
-
-	out << std::fixed << std::setprecision(5)
-		<< st.wYear << "-" << std::setw(2) << std::setfill('0') << st.wMonth << "-"
-		<< std::setw(2) << std::setfill('0') << st.wDay << " "
-		<< std::setw(2) << std::setfill('0') << st.wHour << ":"
-		<< std::setw(2) << std::setfill('0') << st.wMinute << ":"
-		<< std::setw(2) << std::setfill('0') << st.wSecond << std::setfill(' ')
+	out << std::setprecision(5)
 		<< "  rms_mm=" << std::setprecision(1) << rmsErrorMm
 		<< "  spread_m=" << std::setprecision(3) << spreadM
 		<< "  hmdScale=" << std::setprecision(5) << ctx.hmdScale
@@ -162,6 +227,21 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		// eventually be re-tuned against real data rather than a guess.
 		<< "  scale_stderr_eff_pct=" << std::setprecision(3)
 		<< (g_lastScaleStdErrEff >= 0.0 ? g_lastScaleStdErrEff * 100.0 : -1.0)
+		// hmdScale above is the value that SHIPS, now a running average. These three make the
+		// averaging auditable: the raw fit this run produced (-1 when the run did not measure
+		// scale), how many runs are in the average, and what the pooling actually did. Without
+		// the raw column the log would show a reassuringly stable hmdScale and hide the
+		// per-solve scatter that is the entire reason for averaging it.
+		<< "  hmdscale_raw=" << std::setprecision(5)
+		<< (g_lastScaleRaw > 0.0 ? g_lastScaleRaw : -1.0)
+		<< "  hmdscale_n=" << ctx.hmdScaleSamples
+		<< "  scale_pool=" << g_lastScalePoolAction
+		// Observations the solve actually ran on (station-collapsed), and the independent
+		// pairwise-baseline scale with its long-baseline count. scale_pair is NOT applied; it is
+		// here to be compared against hmdscale_raw over real runs.
+		<< "  solve_n=" << g_lastSolveN
+		<< "  scale_pair=" << (g_lastScalePairwise > 0.0 ? g_lastScalePairwise : -1.0)
+		<< "  scale_pair_n=" << g_lastScalePairCount
 		// Solved rotation, plus the pitch/roll tilt away from the expected flip. If
 		// tilt_* scatters run to run it is solver noise (and worth constraining); if it
 		// repeats, it is a real tilt between the two spaces and must be kept.
@@ -824,6 +904,157 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	return fittedScale;
 }
 
+// Largest single-run jump still treated as noise rather than a changed setup. Measured
+// run-to-run sigma on this rig is 0.757%, so 3% is ~4 sigma: past that the likelier
+// explanation is a different headset, streaming stack or SLAM build than a bad draw, and
+// blending across a real change would fight it for eight runs. Mirrors kRemountStepM's role
+// for the lever arm.
+static const double kScaleResetStep = 0.03;
+// Same cap, and the same reason, as kMaxLeverAverage: an uncapped window makes every
+// recalibration weaker than the last, so a genuine change can never be tracked.
+static const int kMaxScaleAverage = 8;
+
+// Average hmdScale across calibrations.
+//
+// Scale is the one calibrated quantity the runtime can never re-estimate: fusion applies
+// hmdScale directly and the EKF carries yaw + translation with no scale state, so whatever a
+// run happens to draw is frozen until the next calibration. Orientation and translation
+// self-heal; this does not. Measured over 14 consecutive solves on this rig the draw scatters
+// sigma 0.757% (peak-to-peak 2.63%) while each solve's own error bar averages 0.202% -- so the
+// estimator is not merely noisy, it does not know that it is noisy, and no per-solve gate
+// tuned against that error bar can catch it. Averaging is the one remedy that does not require
+// trusting the error bar, and it is the identical scheme ComputeRelativeOffset already applies
+// to the lever arm.
+//
+// Only pool a run that actually MEASURED scale. Every kept_*/default_* path in
+// EstimateHmdSpaceScale returns priorScale unchanged, so pooling those would blend the running
+// average into itself: the sample count would climb while no information was added, making the
+// average look better determined than it is and freezing it against later real measurements.
+static void PoolHmdScale(CalibrationContext &ctx, double fitted)
+{
+	// rfind(...,0)==0 is "starts with", which is exactly the distinction the source string
+	// encodes: "measured" and "measured_lowspread" are this run's own fit, everything else
+	// ("kept_*", "default_*") is the prior handed back.
+	const bool measured = std::string(g_lastScaleSource).rfind("measured", 0) == 0;
+
+	if (!measured)
+	{
+		// Identical to the pre-pooling behaviour: the estimator already returned the prior.
+		g_lastScaleRaw = -1.0;
+		g_lastScalePoolAction = "skipped_not_measured";
+		ctx.hmdScale = fitted;
+		return;
+	}
+
+	g_lastScaleRaw = fitted;
+	g_lastScalePoolAction = "blended";
+
+	// Which headset the average describes. A different HMD -- or the same headset behind a
+	// different streaming stack, which this rig has logged as both "1PASH5D1P17365" and
+	// "VRLINKHMDQUESTPRO" -- has its own SLAM scale, so the old average is not evidence about
+	// the new one. Keyed on hmdScaleSerial rather than hmdSerial for the same reason the lever
+	// arm keys on leverSerial: BeginSamplingPhase overwrites the live serial when sampling
+	// starts, so an abandoned run must not be able to retarget the average.
+	if (ctx.hmdScaleSamples > 0 && !ctx.hmdScaleSerial.empty() && !ctx.hmdSerial.empty()
+		&& ctx.hmdScaleSerial != ctx.hmdSerial)
+	{
+		ctx.Log("Headset changed - starting a fresh headset-scale average.\n");
+		ctx.hmdScaleSamples = 0;
+		g_lastScalePoolAction = "reset_hmd_changed";
+	}
+
+	const double prior = ctx.hmdScale;
+	const double stepPct = (prior > 0.0) ? std::fabs(fitted - prior) / prior : 0.0;
+
+	if (ctx.hmdScaleSamples > 0 && stepPct > kScaleResetStep)
+	{
+		char buf[256];
+		snprintf(buf, sizeof buf,
+			"Headset scale moved %.2f%% (%.5f -> %.5f) - too far to be run-to-run noise, so this\n"
+			"is treated as a changed setup and starts a fresh average instead of being blended.\n",
+			stepPct * 100.0, prior, fitted);
+		ctx.Log(buf);
+		ctx.hmdScaleSamples = 0;
+		g_lastScalePoolAction = "reset_large_step";
+	}
+
+	double merged = fitted;
+	if (ctx.hmdScaleSamples > 0)
+	{
+		const int n = (std::min)(ctx.hmdScaleSamples, kMaxScaleAverage);
+		merged = prior + (fitted - prior) / (double)(n + 1);
+	}
+	else if (g_lastScalePoolAction == std::string("blended"))
+	{
+		g_lastScalePoolAction = "seeded";
+	}
+
+	if (ctx.hmdScaleSamples < kMaxScaleAverage)
+		ctx.hmdScaleSamples++;
+
+	// This solve produced a measurement on the current headset: it owns the average from here.
+	ctx.hmdScaleSerial = ctx.hmdSerial;
+	ctx.hmdScale = merged;
+
+	char scaleBuf[256];
+	snprintf(scaleBuf, sizeof scaleBuf,
+		"Headset scale: this run %.5f (%+.2f%%); averaged over %d run(s) -> %.5f (%+.2f%%).\n",
+		fitted, (fitted - 1.0) * 100.0, ctx.hmdScaleSamples, merged, (merged - 1.0) * 100.0);
+	ctx.Log(scaleBuf);
+}
+
+// Scale from pairwise baselines: the median of |dref| / |dtarget| over well-separated pairs.
+//
+// The SVD in EstimateHmdSpaceScale solves scale jointly with a free 3-vector translation and a
+// 3x3 orientation block, so scale competes with six nuisance parameters and inherits their
+// error -- which is why the observability guard there has to reason about conditioning at all.
+// Distances do not have that problem: for any two poses, |ref_i - ref_j| / |tgt_i - tgt_j| is
+// the scale ratio directly, because a rigid rotation and a translation each preserve distance
+// and cancel exactly. RESEARCH.md D1/B1 records that scale is algebraically recoverable from
+// motion pairs; this is that, with the nuisance parameters removed rather than fitted.
+//
+// Only long baselines count. Per-pair ratio noise goes as sigma_tracker / baseline, and short
+// pairs outnumber long ones quadratically, so including them would let noise dominate by sheer
+// count. The median over survivors is then insensitive to the occasional latency-skewed sample
+// that least squares would chase.
+//
+// COMPUTED AND LOGGED, NOT APPLIED. It rides alongside the SVD value for one build so the two
+// can be compared on real calibrations before either is trusted over the other -- changing the
+// estimator and the observation set in the same build would make a bad result uninterpretable.
+static double PairwiseBaselineScale(const std::vector<Sample> &samples, int &outPairs)
+{
+	outPairs = 0;
+	if (samples.size() < 3)
+		return -1.0;
+
+	// At ~0.7 mm of tracker noise at the timescales the solve cares about, a 20 cm baseline
+	// carries ~0.5% per-pair ratio uncertainty; shorter pairs degrade rapidly from there.
+	const double kMinBaseline = 0.20;
+
+	std::vector<double> ratios;
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		for (size_t j = 0; j < i; j++)
+		{
+			const double dRef = (samples[i].ref.trans - samples[j].ref.trans).norm();
+			const double dTgt = (samples[i].target.trans - samples[j].target.trans).norm();
+			if (dRef < kMinBaseline || dTgt < kMinBaseline)
+				continue;
+			ratios.push_back(dRef / dTgt);
+		}
+	}
+
+	// Too few long baselines to median meaningfully -- that is itself the "not enough spread"
+	// condition, reported as unavailable rather than as a confident number.
+	if (ratios.size() < 8)
+		return -1.0;
+
+	std::sort(ratios.begin(), ratios.end());
+	outPairs = (int)ratios.size();
+	const size_t mid = ratios.size() / 2;
+	return (ratios.size() % 2) ? ratios[mid] : 0.5 * (ratios[mid - 1] + ratios[mid]);
+}
+
 static const double AxisVarianceThreshold = 0.0005;
 
 static double SecondAxisVariance(const std::vector<Sample> &samples)
@@ -888,6 +1119,10 @@ static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eige
 	return std::sqrt(accum / (double)samples.size());
 }
 
+// Which device was untracked on the most recent CollectSample, or nullptr when the sample was
+// good. Named rather than boolean so the eventual abort message can say which device went away.
+static const char *g_lastCollectFailure = nullptr;
+
 Sample CollectSample(const CalibrationContext &ctx)
 {
 	vr::TrackedDevicePose_t reference, target;
@@ -897,21 +1132,27 @@ Sample CollectSample(const CalibrationContext &ctx)
 	reference = ctx.devicePoses[0];
 	target = ctx.devicePoses[ctx.targetID];
 
-	bool ok = true;
+	// A single untracked tick is not a failed calibration.
+	//
+	// This used to abort the whole run -- state = None, every sample discarded -- the first
+	// time either pose came back invalid. The head tracker is line-of-sight to a base station,
+	// so brief losses are routine: turning away, an arm across the puck, a step through a blind
+	// spot. Throwing away a minute of good coverage for one bad frame is never the right
+	// response, and because the abort logged only to the in-VR message list it also left no
+	// record of why the run vanished.
+	//
+	// Report which device is missing and let the caller decide: it coasts over short gaps and
+	// aborts only once the loss has lasted long enough to be real. No logging here -- this runs
+	// at 20 Hz, so a per-tick message would bury the log in the time it takes to walk past a
+	// blind spot.
+	g_lastCollectFailure = nullptr;
 	if (!reference.bPoseIsValid)
-	{
-		CalCtx.Log("Reference device is not tracking\n"); ok = false;
-	}
-	if (!target.bPoseIsValid)
-	{
-		CalCtx.Log("Target device is not tracking\n"); ok = false;
-	}
-	if (!ok)
-	{
-		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+		g_lastCollectFailure = "Reference device (HMD)";
+	else if (!target.bPoseIsValid)
+		g_lastCollectFailure = "Target device (head tracker)";
+
+	if (g_lastCollectFailure)
 		return Sample();
-	}
 
 	return Sample(
 		Pose(reference.mDeviceToAbsoluteTracking),
@@ -1346,6 +1587,32 @@ static double g_lastFastDropTime = 0;
 static int g_rejAngCount = 0;
 static int g_rejLinCount = 0;
 
+// Tracking-loss coasting. g_lossStart is when the current gap began (0 while tracking),
+// g_lossTotalTicks counts every dropped tick across the run so the log can show that a
+// finished calibration had holes in it -- coverage numbers alone cannot reveal that.
+static double g_lossStart = 0.0;
+static int g_lossRunTicks = 0;
+static int g_lossTotalTicks = 0;
+// How long either device may stay untracked before the run is abandoned. Long enough to walk
+// through a blind spot and come back, short enough that a genuinely dead tracker does not
+// leave the user staring at a frozen bar.
+static const double kMaxTrackingLossSec = 2.0;
+
+// Plateau finish. Runs used to solve the instant all three gates cleared, which is why 12 of
+// the last 14 calibrations on this rig finished with spread between 0.150 and 0.199 m against
+// a 0.150 m gate: the run cut the user off at the minimum every time, and scale precision goes
+// as 1/spread. Once the gates pass, keep sampling while coverage is still materially improving.
+// This never lowers a bar -- the live gates stay authoritative -- it only delays the solve.
+static double g_gatesPassedTime = 0.0;   // 0 until all three gates first pass
+static double g_plateauRefSpread = 0.0;  // spread at the last plateau checkpoint
+static double g_plateauRefTime = 0.0;
+// Improvement below this over one window counts as plateaued.
+static const double kPlateauMinGainFrac = 0.02;
+static const double kPlateauWindowSec = 4.0;
+// Hard ceiling on the extra sampling, so "keep going while it improves" can never become an
+// unbounded run for a user who keeps drifting slowly across the room.
+static const double kPlateauMaxExtraSec = 20.0;
+
 // --- Stations -------------------------------------------------------------
 //
 // Sampling is capped at 20 Hz (CalibrationTick early-returns below 0.05 s), and
@@ -1472,6 +1739,213 @@ static double TargetSpread(const std::vector<Sample> &samples)
 	return std::sqrt(var / (double)samples.size());
 }
 
+// Which room axis the accepted positions cover worst, as an actionable sentence, or nullptr
+// when coverage is even enough that no single direction is worth singling out.
+//
+// Positional coverage is what makes scale observable, and "cover more of your play space" is
+// not actionable advice to someone who has already walked a line across the room -- they have
+// covered space, just not in the direction that is still degenerate. Room axes are used rather
+// than principal axes deliberately: "step sideways" is something a person can do, an
+// eigenvector is not.
+static const char *WeakestSpreadAxis(const std::vector<Sample> &samples)
+{
+	if (samples.size() < 4)
+		return nullptr;
+
+	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+	for (auto &s : samples)
+		centroid += s.target.trans;
+	centroid /= (double)samples.size();
+
+	Eigen::Vector3d var = Eigen::Vector3d::Zero();
+	for (auto &s : samples)
+	{
+		const Eigen::Vector3d d = s.target.trans - centroid;
+		var += Eigen::Vector3d(d.x() * d.x(), d.y() * d.y(), d.z() * d.z());
+	}
+	var /= (double)samples.size();
+
+	int worst = 0;
+	if (var[1] < var[worst]) worst = 1;
+	if (var[2] < var[worst]) worst = 2;
+
+	// Only name an axis when coverage is genuinely lopsided. Vertical spread is always the
+	// smallest for someone standing up, so a bare argmin would tell every user to crouch
+	// forever; requiring a 4x deficit against the best axis keeps the advice meaningful.
+	const double best = var.maxCoeff();
+	if (best <= 0.0 || var[worst] > 0.25 * best)
+		return nullptr;
+
+	// OpenVR world axes: +x right, +y up, -z forward.
+	switch (worst)
+	{
+	case 0:  return "Thin left-to-right - step sideways, pause, then look around";
+	case 1:  return "Thin vertically - crouch low and stand tall, pausing at each height";
+	default: return "Thin front-to-back - step forward and back, pause, then look around";
+	}
+}
+
+// One averaged observation per station.
+//
+// The solvers treat every sample as an independent observation, and they are not: samples arrive
+// in bursts of up to kMaxSamplesPerStation while the user holds still, so within a station they
+// are near-duplicates with intra-cluster correlation ~1. EstimateHmdSpaceScale already knows
+// this and patches over it, inflating the reported standard error by sqrt(n/K) after the fact
+// (N3-c). Averaging each station down to one observation makes the independence assumption TRUE
+// rather than corrected-for: within-station noise averages down by sqrt(members), the reported
+// error bar becomes meaningful by construction, and the O(N^2) pair loops shrink by the square
+// of the reduction (~200 samples -> ~30 stations is ~20,000 pairs -> ~435).
+//
+// It also deletes the pairs that carry no information: CalibrateRotation forms a delta for every
+// pair, and a pair drawn from inside one station is two readings of the same pose, contributing
+// noise with no signal.
+//
+// Rotations are averaged as sign-aligned quaternions. That linear approximation to the true
+// Karcher mean is valid precisely because a station spans at most kStationAngRadius -- every
+// member is within 18 degrees of the others, so there is no antipodal ambiguity and the error of
+// the approximation sits far below the sample noise.
+static std::vector<Sample> CollapseToStations(const std::vector<Sample> &samples,
+	const std::vector<int> &station)
+{
+	// Partition unavailable or out of step: fall back to the raw set rather than inventing one.
+	if (samples.empty() || samples.size() != station.size())
+		return samples;
+
+	int maxIdx = -1;
+	for (int s : station)
+		if (s > maxIdx)
+			maxIdx = s;
+	if (maxIdx < 0)
+		return samples;
+
+	struct Acc
+	{
+		Eigen::Vector3d refT = Eigen::Vector3d::Zero();
+		Eigen::Vector3d tgtT = Eigen::Vector3d::Zero();
+		Eigen::Quaterniond refQ = Eigen::Quaterniond(0, 0, 0, 0);
+		Eigen::Quaterniond tgtQ = Eigen::Quaterniond(0, 0, 0, 0);
+		int n = 0;
+	};
+	std::vector<Acc> acc((size_t)maxIdx + 1);
+
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		const int s = station[i];
+		if (s < 0 || (size_t)s >= acc.size())
+			continue;
+		Acc &a = acc[(size_t)s];
+
+		a.refT += samples[i].ref.trans;
+		a.tgtT += samples[i].target.trans;
+
+		Eigen::Quaterniond qr(samples[i].ref.rot);
+		Eigen::Quaterniond qt(samples[i].target.rot);
+		// q and -q are the same rotation, so summing raw coefficients can cancel two identical
+		// orientations to zero. Align each addend with the running sum first.
+		if (a.n > 0)
+		{
+			if (a.refQ.coeffs().dot(qr.coeffs()) < 0.0)
+				qr.coeffs() *= -1.0;
+			if (a.tgtQ.coeffs().dot(qt.coeffs()) < 0.0)
+				qt.coeffs() *= -1.0;
+		}
+		a.refQ.coeffs() += qr.coeffs();
+		a.tgtQ.coeffs() += qt.coeffs();
+		a.n++;
+	}
+
+	std::vector<Sample> out;
+	out.reserve(acc.size());
+	for (const Acc &a : acc)
+	{
+		if (a.n == 0)
+			continue;
+		// Degenerate sum (members cancelled despite alignment): drop the station rather than
+		// normalising a near-zero quaternion into an arbitrary rotation.
+		if (a.refQ.coeffs().norm() < 1e-9 || a.tgtQ.coeffs().norm() < 1e-9)
+			continue;
+
+		Pose r, t;
+		r.trans = a.refT / (double)a.n;
+		t.trans = a.tgtT / (double)a.n;
+		r.rot = a.refQ.normalized().toRotationMatrix();
+		t.rot = a.tgtQ.normalized().toRotationMatrix();
+		out.push_back(Sample(r, t));
+	}
+
+	// Never hand back something the solvers cannot use.
+	if (out.size() < 3)
+		return samples;
+	return out;
+}
+
+// Write the raw sample set to disk alongside the solve, one JSON object per line.
+//
+// Agents.md calls the missing replay harness "the binding constraint on estimator work" for the
+// driver. The calibration solver has the identical problem and no equivalent: calibration.log
+// records what a solve concluded, never what it was given, so a change to the solver can only
+// be inspected, never measured. On a rig where scale is frozen for the whole session, an
+// unmeasurable solver change is indistinguishable from the run-to-run scatter it is meant to
+// remove. These dumps make a re-solve reproducible offline -- same input, N different solvers,
+// compared against each other.
+//
+// Must be called BEFORE the sample set is rescaled by hmdScale: the point is the raw pairs.
+// ~200 samples at ~160 bytes is ~32 KB per calibration, and kMaxTotalSamples bounds it, so
+// this is not gated behind a toggle the way the multi-megabyte pose capture is.
+static void DumpCalibrationSamples(const CalibrationContext &ctx,
+	const std::vector<Sample> &samples)
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return;
+
+	std::string dir = std::string(localAppData) + "\\OpenVR-SpaceOverride\\logs";
+	CreateDirectoryA((std::string(localAppData) + "\\OpenVR-SpaceOverride").c_str(), nullptr);
+	CreateDirectoryA(dir.c_str(), nullptr);
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	char stamp[32];
+	snprintf(stamp, sizeof stamp, "%04d%02d%02d_%02d%02d%02d",
+		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+	std::ofstream out(dir + "\\calsamples_" + stamp + ".jsonl");
+	if (!out)
+		return;
+
+	// Header line. Everything a re-solve needs that is not per-sample: which devices, what the
+	// run was configured as, and the prior scale the solve started from.
+	out << std::fixed << std::setprecision(9)
+		<< "{\"type\":\"meta\",\"schema\":1"
+		<< ",\"hmd\":\"" << ctx.hmdSerial << "\""
+		<< ",\"tracker\":\"" << ctx.trackerSerial << "\""
+		<< ",\"speed\":" << (int)ctx.calibrationSpeed
+		<< ",\"stations\":" << g_stationCount
+		<< ",\"samples\":" << samples.size()
+		<< ",\"targetModelScale\":" << ctx.targetModelScale
+		<< ",\"priorHmdScale\":" << ctx.hmdScale
+		<< ",\"priorHmdScaleN\":" << ctx.hmdScaleSamples
+		<< "}\n";
+
+	const bool haveStations = (g_sampleStation.size() == samples.size());
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		// Quaternion rather than the 3x3: four numbers instead of nine, and unambiguous.
+		const Eigen::Quaterniond qr(samples[i].ref.rot);
+		const Eigen::Quaterniond qt(samples[i].target.rot);
+		out << "{\"i\":" << i
+			<< ",\"st\":" << (haveStations ? g_sampleStation[i] : -1)
+			<< ",\"rp\":[" << samples[i].ref.trans.x() << "," << samples[i].ref.trans.y()
+			<< "," << samples[i].ref.trans.z() << "]"
+			<< ",\"rq\":[" << qr.w() << "," << qr.x() << "," << qr.y() << "," << qr.z() << "]"
+			<< ",\"tp\":[" << samples[i].target.trans.x() << "," << samples[i].target.trans.y()
+			<< "," << samples[i].target.trans.z() << "]"
+			<< ",\"tq\":[" << qt.w() << "," << qt.x() << "," << qt.y() << "," << qt.z() << "]"
+			<< "}\n";
+	}
+}
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 {
 	ctx.targetID = targetID;
@@ -1530,11 +2004,22 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_lastFastDropTime = 0;
 	g_rejAngCount = 0;
 	g_rejLinCount = 0;
+	g_lossStart = 0.0;
+	g_lossRunTicks = 0;
+	g_lossTotalTicks = 0;
+	g_gatesPassedTime = 0.0;
+	g_plateauRefSpread = 0.0;
+	g_plateauRefTime = 0.0;
 	// Per-run solver telemetry; stale values would otherwise be attributed to this run.
 	g_lastEarlyFinish = false;
 	g_lastScaleSource = "unknown";
 	g_lastScaleStdErr = -1.0;
 	g_lastScaleStdErrEff = -1.0;
+	g_lastScaleRaw = -1.0;
+	g_lastScalePoolAction = "none";
+	g_lastSolveN = 0;
+	g_lastScalePairwise = -1.0;
+	g_lastScalePairCount = 0;
 	g_lastAxisVariance = 0.0;
 	g_lastSplitHalfDeg = -1.0;
 	g_lastStationCount = 0;
@@ -1717,6 +2202,8 @@ void CalibrationTick(double time)
 			Detection.Clear();
 			ctx.state = CalibrationState::None;
 			CalCtx.Log("Couldn't clearly identify the headset tracker, aborting! Make sure only the headset tracker moves with your head, then try again.\n");
+			LogCalibrationOutcome(ctx, "abort", "tracker_id_ambiguous",
+				0, 0, 0.0, 0.0, 0, 0, 0);
 			return;
 		}
 
@@ -1779,8 +2266,49 @@ void CalibrationTick(double time)
 	auto sample = CollectSample(ctx);
 	if (!sample.valid)
 	{
+		// Coast. Only a loss that outlasts kMaxTrackingLossSec ends the run; anything shorter
+		// costs a few samples and nothing else.
+		if (g_lossStart == 0.0)
+			g_lossStart = time;
+		++g_lossRunTicks;
+		++g_lossTotalTicks;
+
+		const double lostSec = time - g_lossStart;
+		if (lostSec >= kMaxTrackingLossSec)
+		{
+			char buf[256];
+			snprintf(buf, sizeof buf,
+				"%s stopped tracking for %.1f s - aborting calibration. Previous calibration restored.\n",
+				g_lastCollectFailure ? g_lastCollectFailure : "A device", lostSec);
+			ctx.Log(buf);
+			LogCalibrationOutcome(ctx, "abort", "tracking_lost",
+				(int)collectedSamples.size(), g_stationCount, TargetSpread(collectedSamples),
+				SecondAxisVariance(collectedSamples), g_rejAngCount, g_rejLinCount,
+				g_lossTotalTicks);
+			AbortAndRestoreProfile(ctx);
+			return;
+		}
+
+		if ((time - g_lastHintTime) > 0.3)
+		{
+			g_lastHintTime = time;
+			ctx.sampleHint = "Tracking dropped - hold still until it comes back";
+			ctx.sampleHintLevel = 2;
+		}
 		return;
 	}
+
+	if (g_lossRunTicks > 0)
+	{
+		// Recovered. Worth one line: a run that survived several dropouts has gaps in its
+		// coverage that no coverage metric in the final record would otherwise reveal.
+		char buf[160];
+		snprintf(buf, sizeof buf,
+			"Tracking recovered after %d dropped frame(s).\n", g_lossRunTicks);
+		ctx.Log(buf);
+		g_lossRunTicks = 0;
+	}
+	g_lossStart = 0.0;
 
 	auto &samples = collectedSamples;
 	// Hard ceiling. Solves are O(N^2). Once full, do not append; still run finish logic.
@@ -1878,8 +2406,12 @@ void CalibrationTick(double time)
 		else if (spreadFrac < 1.0)
 		{
 			// Samples are only taken while you are still, so the motion that works is
-			// move-then-pause rather than continuous walking.
-			ctx.sampleHint = "Walk to another spot or crouch, pause, look around - need more space coverage for scale";
+			// move-then-pause rather than continuous walking. Name the deficient direction
+			// when there is one; fall back to the general advice when coverage is even.
+			const char *axisHint = WeakestSpreadAxis(samples);
+			ctx.sampleHint = axisHint
+				? axisHint
+				: "Walk to another spot or crouch, pause, look around - need more space coverage for scale";
 			ctx.sampleHintLevel = 1;
 		}
 		else if (stationFrac < 1.0)
@@ -1889,7 +2421,10 @@ void CalibrationTick(double time)
 		}
 		else
 		{
-			ctx.sampleHint = "Coverage ready - finishing calibration";
+			// Gates are met and the run is in its plateau phase. Say so honestly: the bar is
+			// full but more coverage still buys scale precision, and the old text ("finishing
+			// calibration") told the user to stop moving at exactly the wrong moment.
+			ctx.sampleHint = "Coverage met - keep moving to sharpen the scale fit";
 			ctx.sampleHintLevel = 0;
 		}
 	}
@@ -1914,12 +2449,48 @@ void CalibrationTick(double time)
 
 	if (stationsOk && axisOk && spreadOk)
 	{
-		char okBuf[192];
-		snprintf(okBuf, sizeof okBuf,
-			"Coverage ready: %d spots, spread %.2f m, axis_var %.5f, %zu samples.\n",
-			g_stationCount, spreadNow, axisNow, samples.size());
-		CalCtx.Log(okBuf);
-		readyToSolve = true;
+		// Gates met -- but meeting them is the floor, not the target. Scale precision goes as
+		// 1/spread, and solving the instant the bar filled is what pinned 12 of the last 14
+		// runs on this rig between 0.150 and 0.199 m against a 0.150 m gate. Keep collecting
+		// while the user is still covering new ground.
+		if (g_gatesPassedTime == 0.0)
+		{
+			g_gatesPassedTime = time;
+			g_plateauRefSpread = spreadNow;
+			g_plateauRefTime = time;
+			char okBuf[240];
+			snprintf(okBuf, sizeof okBuf,
+				"Coverage met: %d spots, spread %.2f m, axis_var %.5f, %zu samples."
+				" Still collecting while coverage improves.\n",
+				g_stationCount, spreadNow, axisNow, samples.size());
+			CalCtx.Log(okBuf);
+		}
+
+		// "Time since the last meaningful improvement", not "improvement over the last window":
+		// spread is an RMS about a moving centroid, so it dips whenever samples land near the
+		// middle. Measuring against the best figure reached so far makes a dip cost nothing and
+		// only genuine new coverage restart the clock.
+		if (spreadNow > g_plateauRefSpread * (1.0 + kPlateauMinGainFrac))
+		{
+			g_plateauRefSpread = spreadNow;
+			g_plateauRefTime = time;
+		}
+
+		const double heldSec = time - g_gatesPassedTime;
+		const bool plateaued = (time - g_plateauRefTime) >= kPlateauWindowSec;
+		const bool outOfTime = heldSec >= kPlateauMaxExtraSec;
+
+		if (plateaued || outOfTime || atSampleCap)
+		{
+			char doneBuf[256];
+			snprintf(doneBuf, sizeof doneBuf,
+				"Coverage ready: %d spots, spread %.2f m (best %.2f m), axis_var %.5f, %zu samples"
+				" after %.0f s extra (%s).\n",
+				g_stationCount, spreadNow, g_plateauRefSpread, axisNow, samples.size(), heldSec,
+				plateaued ? "improvement plateaued" : (outOfTime ? "time limit" : "sample ceiling"));
+			CalCtx.Log(doneBuf);
+			readyToSolve = true;
+		}
 	}
 	else if (atSampleCap && stationsOk)
 	{
@@ -1938,7 +2509,23 @@ void CalibrationTick(double time)
 		coplanarRetries = 0;
 		g_lastStationCount = g_stationCount;
 
-		ctx.calibratedRotation = CalibrateRotation(samples);
+		// Before anything mutates the set (the hmdScale rescale below does).
+		DumpCalibrationSamples(ctx, samples);
+
+		// Everything downstream solves on ONE observation per station rather than on the raw
+		// burst. `samples` stays untouched as the record of what was collected; `solveSet` is
+		// what the estimators see.
+		std::vector<Sample> solveSet = CollapseToStations(samples, g_sampleStation);
+		g_lastSolveN = (int)solveSet.size();
+		{
+			char collapseBuf[192];
+			snprintf(collapseBuf, sizeof collapseBuf,
+				"Solving on %d station-averaged observations (from %zu raw samples).\n",
+				g_lastSolveN, samples.size());
+			CalCtx.Log(collapseBuf);
+		}
+
+		ctx.calibratedRotation = CalibrateRotation(solveSet);
 
 		// Both spaces are gravity-referenced -- lighthouse levels off the base station's
 		// accelerometer, SLAM off the headset IMU -- so the true relative rotation is a
@@ -1995,16 +2582,25 @@ void CalibrationTick(double time)
 		// value rather than destroying it with a hard 1.0 -- StartCalibration does not reset
 		// ctx.hmdScale, so it still holds the last persisted scale at this point.
 		const double priorHmdScale = ctx.hmdScale;
-		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale, priorHmdScale);
+		const double fittedHmdScale =
+			EstimateHmdSpaceScale(solveSet, calRot, ctx.targetModelScale, priorHmdScale);
+		// Independent cross-check, logged only (see PairwiseBaselineScale). If these two agree
+		// across a few real calibrations, the pairwise estimator is the better primary; if they
+		// diverge, the log says so before anything has been staked on it.
+		g_lastScalePairwise = PairwiseBaselineScale(solveSet, g_lastScalePairCount);
+		// Sets ctx.hmdScale: to the running average when this run measured scale, or straight
+		// back to the prior when it did not. The translation solve below then runs against the
+		// scale that actually ships, so the two stay consistent.
+		PoolHmdScale(ctx, fittedHmdScale);
 
-		for (auto &sample : samples)
+		for (auto &sample : solveSet)
 			sample.ref.trans /= ctx.hmdScale;
 
-		ctx.calibratedTranslation = CalibrateTranslation(samples, calRot, calScale);
+		ctx.calibratedTranslation = CalibrateTranslation(solveSet, calRot, calScale);
 		Eigen::Vector3d calTransM = ctx.calibratedTranslation * 0.01;
 
-		Eigen::Vector3d hmdToTarget = ComputeRefToTargetOffset(samples, calRot, calTransM, calScale);
-		double rmsError = RetargetingErrorRMS(samples, hmdToTarget, calRot, calTransM, calScale);
+		Eigen::Vector3d hmdToTarget = ComputeRefToTargetOffset(solveSet, calRot, calTransM, calScale);
+		double rmsError = RetargetingErrorRMS(solveSet, hmdToTarget, calRot, calTransM, calScale);
 
 		char buf2[256];
 		snprintf(buf2, sizeof buf2, "Calibration residual error (RMS): %.1f mm\n", rmsError * 1000.0);
@@ -2022,11 +2618,21 @@ void CalibrationTick(double time)
 		if (!(rmsError <= 0.1))
 		{
 			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
+			// Capture coverage before the restore: AbortAndRestoreProfile clears the sample set
+			// and the station partition, and LoadProfile rolls ctx.hmdScale back to the stored
+			// value -- which is what we want the record to show, since the rejected fit is not
+			// what the user is left running.
+			const int outAccepted = (int)samples.size();
+			const int outStations = g_stationCount;
+			const double outSpread = g_lastScaleSpread;
+			const double outAxis = g_lastAxisVariance;
 			AbortAndRestoreProfile(ctx);
+			LogCalibrationOutcome(ctx, "abort", "rms_gate", outAccepted, outStations,
+				outSpread, outAxis, g_rejAngCount, g_rejLinCount, g_lossTotalTicks);
 			return;
 		}
 
-		ComputeRelativeOffset(ctx, samples, calRot, calTransM, calScale);
+		ComputeRelativeOffset(ctx, solveSet, calRot, calTransM, calScale);
 
 		ctx.validProfile = true;
 		SaveProfile(ctx);
