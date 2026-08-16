@@ -47,6 +47,14 @@ IPCServer::~IPCServer()
 
 void IPCServer::Run()
 {
+	// Clear the latch before starting. Stop() sets `stop` and nothing else ever cleared it, so a
+	// same-process Cleanup->Init -- which this driver explicitly supports, and where member
+	// initialisers do NOT re-run -- restarted the thread with stop already true. RunThread's
+	// `while (!stop)` then exited on its first iteration, the pipe drained, and the overlay could
+	// never reconnect for the life of the process, with no error anywhere. InjectHooks was given
+	// the matching g_driverShuttingDown.store(false) reset for exactly this reason.
+	stop = false;
+	running = false;
 	mainThread = std::thread(RunThread, this);
 }
 

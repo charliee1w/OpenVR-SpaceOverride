@@ -749,6 +749,11 @@ bool ProcessHmdFrame(
 		else
 		{
 			state.fusion.havePrev = false;
+			// Same reason as the override branch below: a stale pre-filter state would feed the
+			// EKF an observation dragged toward the pre-dropout position, and the translation
+			// innovation gate rejects at ~1.6 cm, so a few centimetres of movement during the gap
+			// is enough to gate every frame on return and force a covariance reset.
+			state.trackerFilter.reset();
 		}
 
 		ApplyDrift(pose, cfg, state);
@@ -928,6 +933,11 @@ bool ProcessHmdFrame(
 	else
 	{
 		state.headVel.reset();
+		// The tracker pre-filter must go too. It keeps X/P/K across the gap, and its gain has
+		// settled to K~0.146, so after a loss during which the user moved it drags the published
+		// position back toward where the head was before the dropout for several frames. reset()
+		// clears `primed`, so the next good sample re-primes the filter to that sample exactly.
+		state.trackerFilter.reset();
 		if (ApplyLastGoodHmd(pose, state, clock, 0.15))
 		{
 			++diag.lastGoodHolds;

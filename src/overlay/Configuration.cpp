@@ -51,11 +51,20 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	auto obj = arr[0].get<picojson::object>();
 
-	// picojson's get<T>() is guarded only by assert(), so under NDEBUG a missing or wrongly-typed
-	// key does not fail — it reads the wrong union member and returns an indeterminate value.
-	// These required keys were the last ones still read unchecked, and this file is the
-	// documented recovery path when the registry is empty, so a truncated or hand-edited mirror
-	// used to yield an indeterminate calibration instead of a catchable error.
+	// CORRECTED 2026-08-16 — the rationale this comment used to give was wrong, and the project's
+	// own rule is that a claim goes in the record only after it has been checked against source.
+	// It said get<T>() is "guarded only by assert(), so under NDEBUG it reads the wrong union
+	// member and returns an indeterminate value". It does not. The vendored
+	// 3rdparty/PicoJSON/picojson.h:93-99 defines PICOJSON_ASSERT(e) as
+	// `if (!(e)) throw std::runtime_error(#e);` unconditionally, NDEBUG or not, and nothing in
+	// this tree overrides it. A wrongly-typed read throws; it never returns garbage.
+	//
+	// What these guards actually buy is therefore a *better message* and a defined failure point,
+	// not memory safety: "profile key 'yaw' missing or not a number" instead of a bare
+	// `"type mismatch! ..." && is<ctype>()`. Worth keeping for that, since this file is the
+	// documented recovery path when the registry is empty. But the dangerous-sounding version of
+	// the story was fiction, and the one change here that fixed a real defect was making the
+	// fork-added booleans optional below — those threw on legitimately older profiles.
 	auto reqDouble = [&](const char *key) -> double {
 		if (!obj[key].is<double>())
 			throw std::runtime_error(std::string("profile key '") + key + "' missing or not a number");
@@ -184,7 +193,14 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["chaperone"].is<picojson::object>())
 	{
 		auto chaperone = obj["chaperone"].get<picojson::object>();
-		ctx.chaperone.autoApply = chaperone["auto_apply"].get<bool>();
+		// Optional, for the same reason native/fallbackSlam/eAngVel are above: get<bool>() throws
+		// on a missing or wrongly-typed key, and a throw here escapes ParseProfile, which makes
+		// LoadProfile discard this whole store and fall through to the other candidate or to
+		// Clear(). Losing a valid rotation, translation and scale over an absent cosmetic flag is
+		// not a trade worth making. Default matches CalibrationContext's initialiser.
+		ctx.chaperone.autoApply = chaperone["auto_apply"].is<bool>()
+			? chaperone["auto_apply"].get<bool>()
+			: true;
 
 		LoadFloatArray(chaperone["play_space_size"], ctx.chaperone.playSpaceSize.v, 2);
 

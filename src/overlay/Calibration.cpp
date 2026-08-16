@@ -1293,6 +1293,33 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	Driver.SendBlocking(req);
 	g_appliedHmd = req.setHmdTracker;
 	g_appliedHmdKnown = true;
+
+	// A disable makes the driver wipe its slamSync set: the SetHmdTracker handler runs
+	// ResetEstimators(clearLastGood=true, clearSlamSync=true), which memsets the whole array
+	// (ServerTrackedDeviceProvider.cpp:479, :576). Our applied-state cache does not see that
+	// happen, and the re-enrolment loop in ScanAndApplyProfile is guarded on `overrideActive`,
+	// so it does not run while the override is off either. The cache therefore still claims
+	// every device is enrolled, and when the override comes back every id hits `continue` and
+	// no SetSlamSync is ever re-sent.
+	//
+	// Measured in session_20260815_211608: the set was populated once at 21:16:15 (ids 1-8),
+	// wiped by the disable at 21:16:32, and never re-sent across NINE further disable/enable
+	// cycles -- so the body pucks ran the remaining ~76 minutes with no drift correction while
+	// the UI showed Continuous Sync on. That is precisely the "body drifts relative to view"
+	// symptom the ops register recorded as resolved by turning Continuous Sync ON; the setting
+	// was on, but the enrolment silently was not.
+	//
+	// Upstream re-sent unconditionally on every ~1 s scan, so this state could not desynchronise.
+	// The dedupe that replaced it saves a pipe write per scan and must therefore be invalidated
+	// wherever the driver drops the state it is caching.
+	if (!enabled)
+	{
+		for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+		{
+			g_appliedSlamKnown[i] = false;
+			g_appliedSlam[i] = false;
+		}
+	}
 }
 
 // https://stackoverflow.com/questions/12374087/average-of-multiple-quaternions/27410865
@@ -2031,7 +2058,6 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 }
 
 static std::vector<Sample> collectedSamples;
-static int coplanarRetries = 0;
 
 void StartCalibration()
 {
@@ -2040,7 +2066,6 @@ void StartCalibration()
 	CalCtx.messages.clear();
 	Detection.Clear();
 	collectedSamples.clear();
-	coplanarRetries = 0;
 	g_havePrevSample = false;
 	ResetStations();
 }
@@ -2053,7 +2078,6 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	LoadProfile(ctx);
 	ctx.state = CalibrationState::None;
 	collectedSamples.clear();
-	coplanarRetries = 0;
 	ResetStations();
 }
 
@@ -2506,8 +2530,7 @@ void CalibrationTick(double time)
 	if (readyToSolve)
 	{
 		CalCtx.Log("\n");
-		coplanarRetries = 0;
-		g_lastStationCount = g_stationCount;
+			g_lastStationCount = g_stationCount;
 
 		// Before anything mutates the set (the hmdScale rescale below does).
 		DumpCalibrationSamples(ctx, samples);

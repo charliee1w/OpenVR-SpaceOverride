@@ -43,6 +43,14 @@ inline bool PoseConfigEqual(const pose_est::PoseConfig& a, const pose_est::PoseC
 		&& a.slamFallback == b.slamFallback
 		&& a.enableAngularVelocity == b.enableAngularVelocity
 		&& a.headFilterEnabled == b.headFilterEnabled
+		// The runtime filter toggles change ProcessHmdFrame's output, so a capture that does not
+		// notice them changing is not replayable: the recorded poses would come from a
+		// configuration the replay cannot reconstruct, with no configSeq bump to mark it.
+		&& a.trackerFilterEnabled == b.trackerFilterEnabled
+		&& a.driftFilterEnabled == b.driftFilterEnabled
+		&& a.headVelFilterEnabled == b.headVelFilterEnabled
+		&& a.publishSlewEnabled == b.publishSlewEnabled
+		&& a.corrRateLimitEnabled == b.corrRateLimitEnabled
 		&& a.predictionTime == b.predictionTime
 		&& a.calibrationScale == b.calibrationScale
 		&& a.hmdScale == b.hmdScale
@@ -254,8 +262,15 @@ void ServerTrackedDeviceProvider::RunFrame()
 			// moved in between.
 			std::unique_lock<std::shared_mutex> lock(configMutex);
 			this->*(t.field) = want;
+			// Reset every filter that can be bypassed, not just two of them. oneeuro::Vec3/Quat
+			// keep `value` and `initialized` across a bypass, so re-enabling driftFilter would
+			// resume from the pre-bypass value and step the published drift transform by however
+			// far the correction moved while it was off -- which lands on the slamSync body
+			// devices and the SLAM-fallback path, not just the head.
 			poseState.trackerFilter.reset();
 			poseState.headVel.reset();
+			poseState.drift.rotationFilter.reset();
+			poseState.drift.translationFilter.reset();
 		}
 		LOG("filter %s -> %s (live, via settings)", t.key, want ? "ON" : "OFF");
 	}
@@ -325,6 +340,15 @@ void ServerTrackedDeviceProvider::LeaveStandby()
 
 void ServerTrackedDeviceProvider::Cleanup()
 {
+	LOG("OpenVR-SpaceOverride unloading");
+	SetDriverShuttingDown(true);
+	server.Stop();
+	DisableHooks();
+
+	// Session stats are read AFTER the hooks are down. Pose callbacks mutate diag.* on other
+	// threads, so formatting these counters while detours are still live read fields that
+	// were being written mid-call -- a torn summary line describing a session that never
+	// happened. Nothing below depends on ordering with the teardown itself.
 	// Same gate as the heartbeat (fusionMode && !native): bare fusionMode claims mode=F for a
 	// session where Discard-Calibrated-Offset left the EKF inert the whole time.
 	const char sessionMode = (fusionMode && !hmdTracker.native) ? 'F' : 'O';
@@ -342,10 +366,6 @@ void ServerTrackedDeviceProvider::Cleanup()
 		sessionMode,
 		(unsigned long long)diag.slamSteps,
 		diag.slamStepSumM);
-	LOG("OpenVR-SpaceOverride unloading");
-	SetDriverShuttingDown(true);
-	server.Stop();
-	DisableHooks();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 	LOG("OpenVR-SpaceOverride unloaded");
 	SetCaptureEnabled(false);
