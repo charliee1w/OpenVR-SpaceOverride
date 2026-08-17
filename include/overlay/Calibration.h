@@ -119,8 +119,11 @@ struct CalibrationContext
 		chaperone.playSpaceSize = vr::HmdVector2_t();
 		chaperone.valid = false;
 
-		calibratedRotation = Eigen::Vector3d();
-		calibratedTranslation = Eigen::Vector3d();
+		// Eigen's default constructor does NOT zero-initialize — that is Zero(). As written
+		// before, "Remove Calibration" assigned indeterminate memory here, and anything that
+		// read the fields before the next solve (profile save, a driver push) shipped garbage.
+		calibratedRotation = Eigen::Vector3d::Zero();
+		calibratedTranslation = Eigen::Vector3d::Zero();
 		calibratedScale = 1.0;
 		targetModelScale = 1.0;
 		hmdScale = 1.0;

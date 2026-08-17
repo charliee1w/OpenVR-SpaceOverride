@@ -1265,13 +1265,26 @@ static void ApplyDeviceTransform(uint32_t id, bool enabled, const vr::HmdVector3
 		vr::HmdQuaternion_t zeroQ{ 1, 0, 0, 0 };
 		req.setDeviceTransform = { id, false, zeroV, zeroQ, 1.0 };
 	}
-	Driver.SendBlocking(req);
-
-	prev.known = true;
-	prev.enabled = enabled;
-	prev.translation = translation;
-	prev.rotation = rotation;
-	prev.scale = scale;
+	// Send() throws on a broken pipe, and this runs on the overlay main loop with no handler
+	// above it — an uncaught throw here is std::terminate, killing the overlay before its
+	// exit-time SaveProfile. A pipe break happens precisely when the driver goes away
+	// (SteamVR shutdown, driver reload), i.e. exactly when unsaved state exists. On failure
+	// the applied-state cache is left NOT-known so the next scan re-sends — caching a send
+	// that never arrived is the silent-desync class fa7dc28 fixed.
+	try
+	{
+		Driver.SendBlocking(req);
+		prev.known = true;
+		prev.enabled = enabled;
+		prev.translation = translation;
+		prev.rotation = rotation;
+		prev.scale = scale;
+	}
+	catch (const std::runtime_error &e)
+	{
+		prev.known = false;
+		std::cerr << "Failed to send device transform for id " << id << ": " << e.what() << std::endl;
+	}
 }
 
 void ResetAndDisableOffsets(uint32_t id)
@@ -1345,9 +1358,19 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 		return;
 	}
 
-	Driver.SendBlocking(req);
-	g_appliedHmd = req.setHmdTracker;
-	g_appliedHmdKnown = true;
+	// Same broken-pipe hazard as SetDeviceTransform above; same cache rule on failure.
+	try
+	{
+		Driver.SendBlocking(req);
+		g_appliedHmd = req.setHmdTracker;
+		g_appliedHmdKnown = true;
+	}
+	catch (const std::runtime_error &e)
+	{
+		g_appliedHmdKnown = false;
+		std::cerr << "Failed to send SetHmdTracker: " << e.what() << std::endl;
+		return;
+	}
 
 	// A disable makes the driver wipe its slamSync set: the SetHmdTracker handler runs
 	// ResetEstimators(clearLastGood=true, clearSlamSync=true), which memsets the whole array
@@ -1623,9 +1646,20 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 
 		protocol::Request req(protocol::RequestSetSlamSync);
 		req.setSlamSync = { id, sync };
-		Driver.SendBlocking(req);
-		g_appliedSlamKnown[id] = true;
-		g_appliedSlam[id] = sync;
+		// Broken-pipe guard (see SetDeviceTransform). One failure means the pipe is dead for
+		// all of them — stop the loop rather than throwing up to 60 more times this scan.
+		try
+		{
+			Driver.SendBlocking(req);
+			g_appliedSlamKnown[id] = true;
+			g_appliedSlam[id] = sync;
+		}
+		catch (const std::runtime_error &e)
+		{
+			g_appliedSlamKnown[id] = false;
+			std::cerr << "Failed to send SetSlamSync for id " << id << ": " << e.what() << std::endl;
+			break;
+		}
 	}
 
 	if (overrideActive)

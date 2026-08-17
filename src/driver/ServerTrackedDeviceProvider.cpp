@@ -207,6 +207,15 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		? "FUSION (SLAM source, tracker observes correction, slam-step cancel)"
 		: "OVERRIDE (tracker source, classic)");
 
+	// The two sinks are gated differently, deliberately. The CSV logs EKF innovations, which
+	// only exist in fusion; the .sor capture records everything ProcessHmdFrame reads and is
+	// equally replayable in override — RecConfigPayload carries native/fusionMode per config
+	// precisely so a reader knows which path ran. These used to share one fusionMode-anded
+	// gate, so an override session produced NO capture at all: session_20260816_023031's
+	// capture stopped growing at 02:31:47, the moment the mode switched, while the session
+	// ran 44 more minutes — unreplayable, with the replay harness (N2-a) named as the binding
+	// constraint on all estimator work. Found by the 2026-08-16 audit, upheld, verified
+	// against that session's files.
 	if (fusionMode && fusionDiag)
 	{
 		// Epoch first, then open — a frame that sees the sink open must not log against a stale
@@ -214,9 +223,12 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		LARGE_INTEGER _ds{}; QueryPerformanceCounter(&_ds); poseState.diagStart = _ds.QuadPart;
 		poseState.diagLastWrite = 0;
 		OpenDiagCsv();
+	}
+	if (fusionDiag)
+	{
 		SetCaptureEnabled(true);
 		LOG("diagnostics enabled: fusion_diag %s, capture %s",
-			DiagCsvOpen() ? "open" : "FAILED to open",
+			(fusionMode ? (DiagCsvOpen() ? "open" : "FAILED to open") : "n/a (override)"),
 			CaptureEnabled() ? "open" : "FAILED to open");
 	}
 
@@ -298,7 +310,10 @@ void ServerTrackedDeviceProvider::RunFrame()
 	}
 
 	{
+		// CSV is fusion-only (EKF innovations); the .sor capture follows the user toggle alone
+		// so override sessions are replayable too. See the matching split in Init().
 		const bool wantCsv = fusionMode && fusionDiag;
+		const bool wantCap = fusionDiag;
 		if (wantCsv != DiagCsvOpen())
 		{
 			if (wantCsv)
@@ -329,7 +344,7 @@ void ServerTrackedDeviceProvider::RunFrame()
 		// land between that and this thread taking configMutex — writing a Rec_Frame whose
 		// counters still belonged to the previous file. The pose path resets them itself, keyed
 		// on CaptureGeneration(), on the only thread that writes them.
-		SetCaptureEnabled(wantCsv);
+		SetCaptureEnabled(wantCap);
 	}
 }
 
@@ -1187,6 +1202,14 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					// transition is carried by the Rec_Event mirror of the SetHmdTracker line.
 					crec.enabled = hmdTracker.enabled ? 1 : 0;
 					crec.trackerID = hmdTracker.trackerID;
+					// rev3: the five runtime toggles. PoseConfigEqual already compares them, so
+					// without these fields a toggle flip emitted a new Rec_Config that was
+					// byte-identical to the previous one — "config changed" with no visible delta.
+					crec.trackerFilterEnabled = cfg.trackerFilterEnabled ? 1 : 0;
+					crec.driftFilterEnabled = cfg.driftFilterEnabled ? 1 : 0;
+					crec.headVelFilterEnabled = cfg.headVelFilterEnabled ? 1 : 0;
+					crec.publishSlewEnabled = cfg.publishSlewEnabled ? 1 : 0;
+					crec.corrRateLimitEnabled = cfg.corrRateLimitEnabled ? 1 : 0;
 					CaptureWrite(capture::Rec_Config, &crec, sizeof crec);
 					captureConfigWrittenSeq = captureConfigSeq;
 				}

@@ -66,7 +66,16 @@ constexpr uint32_t kFormatVersion = 1;
 // rev2 (2026-08-06): appended `enabled` + `trackerID` to Rec_Config; added Rec_DeviceInfo. Both
 // are backward-compatible — a rev1 reader parses the config prefix it knows and skips record
 // type 5 by `len`. Driven by what the first real capture could NOT answer; see N2-d.
-constexpr uint32_t kSchemaRevision = 2;
+//
+// rev3 (2026-08-17): appended the five runtime filter toggles to Rec_Config. dfc6ab3 made them
+// live-pollable and PoseConfigEqual already compares all five ("a capture that does not notice
+// them changing is not replayable"), so flipping one bumped configSeq — but the payload carried
+// no delta, so the file signalled "config changed" while being byte-identical. Worse, a replay
+// links ProcessHmdFrame and builds a PoseConfig from struct DEFAULTS for these fields, so a
+// session recorded with trackerFilter=true replays with it off — and N4-e's own measurement
+// shows that flips whether the white-noise model is accepted on the y axis, silently poisoning
+// any Rt0 derived from it. Append-only; rev2 readers keep working.
+constexpr uint32_t kSchemaRevision = 3;
 
 enum RecordType : uint16_t
 {
@@ -119,6 +128,18 @@ struct RecConfigPayload
 	uint8_t  enabled;
 	uint8_t  _pad3[3];
 	uint32_t trackerID;         // vr::k_unTrackedDeviceIndexInvalid when none
+
+	// --- appended in rev3 ---
+	// The five runtime filter toggles. All five change ProcessHmdFrame's output, all five are
+	// compared by PoseConfigEqual (so they bump configSeq), and until rev3 none of them were
+	// recorded — a replay fell back to struct defaults, which reconstruct correctly only when
+	// the user never touched a toggle. Exactly the no-op-on-default pattern.
+	uint8_t  trackerFilterEnabled;
+	uint8_t  driftFilterEnabled;
+	uint8_t  headVelFilterEnabled;
+	uint8_t  publishSlewEnabled;
+	uint8_t  corrRateLimitEnabled;
+	uint8_t  _pad4[3];
 };
 
 // --- Rec_Frame --------------------------------------------------------------------------------
@@ -239,18 +260,21 @@ struct RecEventHeader
 // Layout guards. If you append a field the assert fires — update the size AND kSchemaText, which
 // is the point: the schema cannot silently drift from the structs.
 static_assert(sizeof(RecHeader) == 4, "RecHeader framing changed — bump kFormatVersion");
-static_assert(sizeof(RecConfigPayload) == 156, "RecConfigPayload changed — bump kSchemaRevision and update kSchemaText");
+static_assert(sizeof(RecConfigPayload) == 164, "RecConfigPayload changed — bump kSchemaRevision and update kSchemaText");
 static_assert(sizeof(RecFramePayload) == 464, "RecFramePayload changed — bump kSchemaRevision and update kSchemaText");
 static_assert(sizeof(RecDevicePayload) == 80, "RecDevicePayload changed — bump kSchemaRevision and update kSchemaText");
 static_assert(sizeof(RecDeviceInfoPayload) == 152, "RecDeviceInfoPayload changed — bump kSchemaRevision and update kSchemaText");
 
 // Embedded in every capture's header so a file is interpretable years later without this repo.
 constexpr const char* kSchemaText =
-	"SORCAP v1 rev2 — OpenVR-SpaceOverride estimator input capture\n"
+	"SORCAP v1 rev3 — OpenVR-SpaceOverride estimator input capture\n"
 	"Framing: [u16 type][u16 len][payload len bytes]. Skip unknown types by len. All LE, packed.\n"
-	"1 Config(156): seq u32; fusionMode,native,slamFallback,enableAngularVelocity,headFilterEnabled u8;\n"
+	"1 Config(164): seq u32; fusionMode,native,slamFallback,enableAngularVelocity,headFilterEnabled u8;\n"
 	"   pad3; predictionTime f32; pad4; offsetRot q4; offsetTrans v3; calRot q4; calTrans v3;\n"
-	"   calibrationScale f64; hmdScale f64; [rev2] enabled u8; pad3; trackerID u32\n"
+	"   calibrationScale f64; hmdScale f64; [rev2] enabled u8; pad3; trackerID u32;\n"
+	"   [rev3] trackerFilterEnabled,driftFilterEnabled,headVelFilterEnabled,publishSlewEnabled,\n"
+	"   corrRateLimitEnabled u8; pad3. Replays MUST honour these five - defaults are wrong for\n"
+	"   any session where the user touched a toggle\n"
 	"2 Frame(464): configSeq u32; frameIndex u32; clockNow i64; clockFreq i64; displayHz f64;\n"
 	"   hmdRawValid u8; pad7; hmdRot q4; hmdPos v3;\n"
 	"   trkPoseOk,trkOkForOverride,trkSpeedReject u8; pad5; trkResult i32; pad4;\n"
