@@ -1530,27 +1530,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 
 		if (trackingSystem == ctx.targetTrackingSystem) {
-			// Each model's constant is an ABSOLUTE correction for how that model reports
-			// distance, so it is applied as-is. It used to be divided by the head tracker's
-			// constant, which made every body device's scale depend on which model happened
-			// to be strapped to the headset -- on a single-model fleet the ratio is 1 and the
-			// bug is invisible, which is why it survived.
-			//
-			// This rig is mixed: 6x Tundra (0.9969), 3x Vive 3.0 (1.0034), Knuckles (untabled,
-			// 1.0), calibrated off a Vive 3.0 head tracker. The divisor therefore shipped the
-			// Tundras at 0.9969/1.0034 = 0.99352 instead of 0.9969 -- 0.34% short, ~7-10 mm of
-			// radial error at 2-3 m from the lighthouse origin, which reads as a constant
-			// positional offset on every body puck.
-			//
-			// Measured, not reasoned: tuning the manual scale trim by hand to line the body
-			// up landed on 1.00350 (profile saved 2026-08-16), against targetModelScale
-			// 1.00340 -- agreement to 1e-4. That trim does exactly one thing algebraically,
-			// which is cancel this divisor, so the value it converged to IS the measurement.
-			//
-			// Note this is the reason calibratedScale can safely be reset to 1.0 by every
-			// solve (see calScale below): with the divisor gone, 1.0 is the correct default
-			// and no hand trim is needed to compensate for the head tracker's model.
-			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id);
+			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id) / ctx.targetModelScale;
 			ApplyDeviceTransform(
 				id,
 				true,
