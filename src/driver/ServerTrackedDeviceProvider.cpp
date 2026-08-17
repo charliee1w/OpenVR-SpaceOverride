@@ -160,6 +160,20 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 		transforms[i].scale = 1.0;
 	}
 	memset(slamSync, 0, sizeof slamSync);
+	// Third member of the same shape as IPCServer::Run()'s `stop` latch and InjectHooks'
+	// g_driverShuttingDown, and the one with the largest blast radius. g_server is a file-scope
+	// global (Main.cpp), so member initialisers run once per PROCESS, not once per driver load.
+	// Everything else here is already re-initialised for that reason; hmdTracker was not, so a
+	// same-process Cleanup->Init resumed with enabled==true and the pre-reload trackerID while
+	// transforms[] had just been cleared. The overlay cannot correct it -- IPCClient connects
+	// once from InitCalibrator and has no reconnect path -- so nothing re-pushes SetHmdTracker
+	// and no log line fires. OpenVR indices are assigned in connection order and are known
+	// unstable on this rig (Agents.md N2-d(c): LHR-B783BF48 was id 12 one session, id 9 another),
+	// so a stale trackerID means the quash parks whatever device now holds that index at
+	// +9001 m with poseIsValid=true -- exactly what C10/C11 exist to prevent. Coming up inert
+	// until the overlay pushes a fresh SetHmdTracker is what Init already does for every other
+	// member.
+	hmdTracker = {};
 	diag = pose_est::PoseDiag{};
 	poseState = pose_est::PoseState{};
 	sharedDrift = SharedDrift{};

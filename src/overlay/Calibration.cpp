@@ -158,6 +158,21 @@ static bool OpenCalibrationLog(std::ofstream &out)
 // exactly backwards, since the runs that die are the ones worth a record. Coverage is passed in
 // rather than read from file statics so this can be called from abort paths that run before,
 // during or after sampling.
+// Rigid-pair gate counters. Declared up here because the calibration.log writers below read
+// them; the gate itself lives in CalibrationTick. See the block comment there for the
+// measurement that set the thresholds.
+static int g_rejRigidCount = 0;
+static int g_rejStaleCount = 0;
+static int g_frameBreakCount = 0;
+
+static double RotAngleBetween(const Eigen::Matrix3d &a, const Eigen::Matrix3d &b);
+
+// windows.h defines min/max as macros in this TU, so std::min does not compile here.
+static double Vec3Norm(const vr::HmdVector3d_t &v)
+{
+	return std::sqrt(v.v[0] * v.v[0] + v.v[1] * v.v[1] + v.v[2] * v.v[2]);
+}
+
 static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *result,
 	const char *reason, int accepted, int stations, double spreadM, double axisVar,
 	int rejAng, int rejLin, int droppedFrames)
@@ -176,6 +191,12 @@ static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *res
 		<< "  axis_var=" << std::setprecision(6) << axisVar
 		<< "  rej_ang=" << rejAng
 		<< "  rej_lin=" << rejLin
+		// Rigid-pair gate. rej_stale counts bit-identical HMD poses (a stalled pose source),
+		// frame_breaks counts SLAM relocalisations that forced a restart. A run with a
+		// nonzero frame_breaks is one the old code would have solved as if nothing happened.
+		<< "  rej_rigid=" << g_rejRigidCount
+		<< "  rej_stale=" << g_rejStaleCount
+		<< "  frame_breaks=" << g_frameBreakCount
 		<< "  dropped=" << droppedFrames
 		<< "  speed=" << (int)ctx.calibrationSpeed
 		// The scale and lever the run was ABOUT to modify, so an abort can be told apart from
@@ -214,6 +235,12 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  early=" << (g_lastEarlyFinish ? 1 : 0)
 		<< "  rej_ang=" << rejAng
 		<< "  rej_lin=" << rejLin
+		// Rigid-pair gate. rej_stale counts bit-identical HMD poses (a stalled pose source),
+		// frame_breaks counts SLAM relocalisations that forced a restart. A run with a
+		// nonzero frame_breaks is one the old code would have solved as if nothing happened.
+		<< "  rej_rigid=" << g_rejRigidCount
+		<< "  rej_stale=" << g_rejStaleCount
+		<< "  frame_breaks=" << g_frameBreakCount
 		<< "  cells=" << coverageCells
 		// Where hmdScale came from, and how well determined it was. "measured" is the
 		// only value that reflects this run; "kept_*" means the run could not observe
@@ -1021,7 +1048,7 @@ static void PoolHmdScale(CalibrationContext &ctx, double fitted)
 // COMPUTED AND LOGGED, NOT APPLIED. It rides alongside the SVD value for one build so the two
 // can be compared on real calibrations before either is trusted over the other -- changing the
 // estimator and the observation set in the same build would make a bad result uninterpretable.
-static double PairwiseBaselineScale(const std::vector<Sample> &samples, int &outPairs)
+static double PairwiseBaselineScale(const std::vector<Sample> &samples, double leverM, int &outPairs)
 {
 	outPairs = 0;
 	if (samples.size() < 3)
@@ -1031,6 +1058,16 @@ static double PairwiseBaselineScale(const std::vector<Sample> &samples, int &out
 	// carries ~0.5% per-pair ratio uncertainty; shorter pairs degrade rapidly from there.
 	const double kMinBaseline = 0.20;
 
+	// The two devices are ~100 mm apart on a rigid mount, so |dref| and |dtgt| are chords
+	// between DIFFERENT points on the same body. Head rotation sweeps the tracker through an
+	// arc the HMD origin does not travel, and the raw ratio then measures how much the head
+	// turned rather than the scale between the spaces. That is not a small effect at this
+	// baseline: the logged scale_pair sat at 0.78-0.86 across 2026-08-16 while the SVD fit read
+	// 0.994, and the divergence is entirely this term. Admit only pairs where the lever's
+	// possible contribution is negligible against the baseline, which leaves the ratio
+	// measuring what its name claims.
+	const double kLeverFrac = 0.01;   // lever sweep must be <1% of the baseline
+
 	std::vector<double> ratios;
 	for (size_t i = 0; i < samples.size(); i++)
 	{
@@ -1039,6 +1076,11 @@ static double PairwiseBaselineScale(const std::vector<Sample> &samples, int &out
 			const double dRef = (samples[i].ref.trans - samples[j].ref.trans).norm();
 			const double dTgt = (samples[i].target.trans - samples[j].target.trans).norm();
 			if (dRef < kMinBaseline || dTgt < kMinBaseline)
+				continue;
+			// RotAngleBetween already clamps into [0, pi]; std::min is unavailable here anyway.
+			const double dTheta = RotAngleBetween(samples[i].target.rot, samples[j].target.rot);
+			const double sweep = 2.0 * leverM * std::sin(dTheta * 0.5);
+			if (sweep > kLeverFrac * (dRef < dTgt ? dRef : dTgt))
 				continue;
 			ratios.push_back(dRef / dTgt);
 		}
@@ -1614,6 +1656,16 @@ static double g_lastFastDropTime = 0;
 static int g_rejAngCount = 0;
 static int g_rejLinCount = 0;
 
+// Rigid-pair consistency state. The HMD and the head tracker are bolted to the same head,
+// so between any two samples their displacements can differ by no more than the lever arm
+// sweeping through the rotation: | |dref| - |dtgt| | <= 2*|L|*sin(dtheta/2). Anything past
+// that is not motion, it is one of the two reference frames moving underneath us -- which
+// on a streamed headset means a SLAM relocalisation mid-run.
+static bool g_havePrevAccepted = false;
+static Eigen::Vector3d g_prevAcceptedRef = Eigen::Vector3d::Zero();
+static Eigen::Vector3d g_prevAcceptedTgt = Eigen::Vector3d::Zero();
+static Eigen::Matrix3d g_prevAcceptedTgtRot = Eigen::Matrix3d::Identity();
+
 // Tracking-loss coasting. g_lossStart is when the current gap began (0 while tracking),
 // g_lossTotalTicks counts every dropped tick across the run so the log can show that a
 // finished calibration had holes in it -- coverage numbers alone cannot reveal that.
@@ -2031,6 +2083,10 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	g_lastFastDropTime = 0;
 	g_rejAngCount = 0;
 	g_rejLinCount = 0;
+	g_havePrevAccepted = false;
+	g_rejRigidCount = 0;
+	g_rejStaleCount = 0;
+	g_frameBreakCount = 0;
 	g_lossStart = 0.0;
 	g_lossRunTicks = 0;
 	g_lossTotalTicks = 0;
@@ -2075,7 +2131,41 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	if (ctx.targetID != vr::k_unTrackedDeviceIndexInvalid)
 		ResetAndDisableOffsets(ctx.targetID);
 
+	// An abort is supposed to restore the CALIBRATION. LoadProfile restores the whole profile,
+	// and ParseProfile unconditionally rewrites every Settings/Smoothing field too
+	// (Configuration.cpp: native/fallbackSlam/eAngVel, continuousSync, predictionTime,
+	// headFilterEnabled + both One-Euro sets, calibration_speed). None of those controls call
+	// SaveProfile at the point of change -- persistence happens only at solve time or at
+	// overlay exit -- so an abort silently threw away whatever the user had just set, and the
+	// message said only "Previous calibration restored".
+	//
+	// That is not cosmetic: continuousSync reverting to the stored value makes the next 1 Hz
+	// ScanAndApplyProfile push sync=false to every body puck, so the pucks lose drift
+	// correction while the UI still shows the setting the user chose. Aborts are routine on
+	// this rig (tracking_lost on a single-base-station room, rms_gate on a relocalisation), so
+	// this fires often. Snapshot the non-calibration fields across the reload and put them back.
+	const bool sNative = ctx.enableNative;
+	const bool sFallback = ctx.fallbackToSlam;
+	const bool sEAngVel = ctx.enableAngularVelocity;
+	const bool sSync = ctx.continuousSync;
+	const double sPred = ctx.predictionTime;
+	const bool sHeadFilt = ctx.headFilterEnabled;
+	const protocol::OneEuroParams sHeadP = ctx.headFilterParams;
+	const protocol::OneEuroParams sDriftP = ctx.driftFilterParams;
+	const CalibrationContext::Speed sSpeed = ctx.calibrationSpeed;
+
 	LoadProfile(ctx);
+
+	ctx.enableNative = sNative;
+	ctx.fallbackToSlam = sFallback;
+	ctx.enableAngularVelocity = sEAngVel;
+	ctx.continuousSync = sSync;
+	ctx.predictionTime = sPred;
+	ctx.headFilterEnabled = sHeadFilt;
+	ctx.headFilterParams = sHeadP;
+	ctx.driftFilterParams = sDriftP;
+	ctx.calibrationSpeed = sSpeed;
+
 	ctx.state = CalibrationState::None;
 	collectedSamples.clear();
 	ResetStations();
@@ -2333,6 +2423,94 @@ void CalibrationTick(double time)
 		g_lossRunTicks = 0;
 	}
 	g_lossStart = 0.0;
+
+	// ---- Rigid-pair consistency (N-cal-a) -------------------------------------------------
+	//
+	// The solve assumes ref (SLAM) and target (lighthouse) are two rigidly-related spaces for
+	// the whole run, and until now nothing checked that. The V3-e speed gate above cannot: it
+	// updates g_prevSampleHmdPos before returning, so on a mid-run frame shift the samples on
+	// BOTH sides are accepted and get solved together. Worse, a frozen pose source reads as
+	// zero speed, so that gate preferentially accepts exactly the stale samples.
+	//
+	// Measured on this rig, replaying the seven calsamples_20260816_* runs:
+	//   run      logged rms_mm   rigid rejects   frozen   discontinuity
+	//   022323   3.1                 0             0        -
+	//   022422   4.6                 1             0        -
+	//   023412   2.7                 0             0        -
+	//   161436   4.3                 0             0        -
+	//   161724   1.7                 0             0        -
+	//   023120   15.9  (worst)       2             0        -
+	//   165347   abort rms_gate      2             7        i=210, residual 0.660 m
+	// Benign runs sit at p99 <= 0.009 m and max <= 0.034 m; the 165347 break is 0.660 m, and
+	// its seven frozen samples carry a bit-identical HMD pose while the tracker moved 3-4 cm.
+	// So the thresholds below are ~2x above the worst benign p99 and ~3x below the observed
+	// break, and cost 0-2 samples out of 220-515 on runs that were fine.
+	//
+	// What 165347 cost: two internally-clean solves 0.76 m and 3 deg apart were averaged into
+	// one, produced 127-237 mm RMS, and the user lost a 428-sample run to "reason=rms_gate"
+	// with nothing in the log saying why. The silent case is worse -- a 1 cm shift passes every
+	// existing gate and writes hmdScale +1.22% off, which is frozen for the session.
+	{
+		const double kStaleTgtMotionM  = 0.005;  // tracker moved this far while HMD did not move at all
+		const double kRigidRejectM     = 0.020;  // drop the sample
+		const double kFrameBreakM      = 0.100;  // the reference frame moved; everything so far is unusable
+
+		if (g_havePrevAccepted)
+		{
+			const double dRef = (sample.ref.trans - g_prevAcceptedRef).norm();
+			const double dTgt = (sample.target.trans - g_prevAcceptedTgt).norm();
+			const double dTheta = RotAngleBetween(sample.target.rot, g_prevAcceptedTgtRot);
+			const double lever = ctx.validRelativeOffset
+				? Vec3Norm(ctx.relativeTranslation)
+				: 0.15;   // pre-first-calibration fallback, deliberately generous
+			const double bound = 2.0 * lever * std::sin(dTheta * 0.5);
+			const double residual = std::fabs(dRef - dTgt) - bound;
+
+			// Bit-identical HMD pose while the tracker demonstrably moved. Unambiguous: the
+			// pose source stalled. No threshold needed, and it is the streamed-headset failure
+			// that precedes the jump.
+			if (dRef == 0.0 && dTgt > kStaleTgtMotionM)
+			{
+				++g_rejStaleCount;
+				ctx.sampleHint = "Headset pose is frozen - samples paused until it updates";
+				ctx.sampleHintLevel = 2;
+				return;
+			}
+
+			if (residual > kFrameBreakM)
+			{
+				// The pre-shift samples cannot be reconciled with the post-shift ones by any
+				// rigid transform, so keeping them is what produces the two-solves-averaged
+				// failure. Discard and restart collection rather than abort: the user is
+				// already standing there, and the run is recoverable if the frame settles.
+				++g_frameBreakCount;
+				char fb[256];
+				snprintf(fb, sizeof fb,
+					"Headset tracking origin shifted %.2f m mid-calibration (relocalisation).\n"
+					"Discarding the %d samples taken before it and starting the collection over.\n",
+					residual, (int)collectedSamples.size());
+				ctx.Log(fb);
+				collectedSamples.clear();
+				g_sampleStation.clear();
+				ResetStations();
+				g_havePrevAccepted = false;
+				ctx.sampleHint = "Headset re-centred itself - restarting, keep moving";
+				ctx.sampleHintLevel = 2;
+				return;
+			}
+
+			if (residual > kRigidRejectM)
+			{
+				++g_rejRigidCount;
+				return;
+			}
+		}
+
+		g_prevAcceptedRef = sample.ref.trans;
+		g_prevAcceptedTgt = sample.target.trans;
+		g_prevAcceptedTgtRot = sample.target.rot;
+		g_havePrevAccepted = true;
+	}
 
 	auto &samples = collectedSamples;
 	// Hard ceiling. Solves are O(N^2). Once full, do not append; still run finish logic.
@@ -2610,7 +2788,9 @@ void CalibrationTick(double time)
 		// Independent cross-check, logged only (see PairwiseBaselineScale). If these two agree
 		// across a few real calibrations, the pairwise estimator is the better primary; if they
 		// diverge, the log says so before anything has been staked on it.
-		g_lastScalePairwise = PairwiseBaselineScale(solveSet, g_lastScalePairCount);
+		g_lastScalePairwise = PairwiseBaselineScale(solveSet,
+			ctx.validRelativeOffset ? Vec3Norm(ctx.relativeTranslation) : 0.10,
+			g_lastScalePairCount);
 		// Sets ctx.hmdScale: to the running average when this run measured scale, or straight
 		// back to the prior when it did not. The translation solve below then runs against the
 		// scale that actually ships, so the two stay consistent.
