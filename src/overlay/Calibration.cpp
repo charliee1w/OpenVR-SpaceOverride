@@ -1048,7 +1048,8 @@ static void PoolHmdScale(CalibrationContext &ctx, double fitted)
 // COMPUTED AND LOGGED, NOT APPLIED. It rides alongside the SVD value for one build so the two
 // can be compared on real calibrations before either is trusted over the other -- changing the
 // estimator and the observation set in the same build would make a bad result uninterpretable.
-static double PairwiseBaselineScale(const std::vector<Sample> &samples, double leverM, int &outPairs)
+static double PairwiseBaselineScale(const std::vector<Sample> &samples,
+	const Eigen::Vector3d &leverVec, bool haveLever, int &outPairs)
 {
 	outPairs = 0;
 	if (samples.size() < 3)
@@ -1058,15 +1059,32 @@ static double PairwiseBaselineScale(const std::vector<Sample> &samples, double l
 	// carries ~0.5% per-pair ratio uncertainty; shorter pairs degrade rapidly from there.
 	const double kMinBaseline = 0.20;
 
-	// The two devices are ~100 mm apart on a rigid mount, so |dref| and |dtgt| are chords
-	// between DIFFERENT points on the same body. Head rotation sweeps the tracker through an
-	// arc the HMD origin does not travel, and the raw ratio then measures how much the head
-	// turned rather than the scale between the spaces. That is not a small effect at this
-	// baseline: the logged scale_pair sat at 0.78-0.86 across 2026-08-16 while the SVD fit read
-	// 0.994, and the divergence is entirely this term. Admit only pairs where the lever's
-	// possible contribution is negligible against the baseline, which leaves the ratio
-	// measuring what its name claims.
-	const double kLeverFrac = 0.01;   // lever sweep must be <1% of the baseline
+	// The two devices are ~100 mm apart on a rigid mount, so raw |dref| vs |dtgt| are chords
+	// between DIFFERENT points on the same body: head rotation sweeps the tracker through an
+	// arc the HMD origin does not travel, and the raw ratio measures how much the head turned,
+	// not scale -- the logged scale_pair sat at 0.78-0.86 across 2026-08-16 while the SVD fit
+	// read 0.994. A first attempt to *filter* rotated pairs out required <1.1 deg of rotation
+	// across a >=20 cm baseline, which never happens while calibrating, and logged
+	// scale_pair_n=0 all night (2026-08-16/17) -- muting the diagnostic instead of fixing it.
+	//
+	// So remove the bias instead of filtering it: project each tracker sample to the HMD point
+	// it implies, tp + R_tq * lever, and ratio same-point chords. The calibration rotation is
+	// a fixed rotation and preserves chord lengths, so raw target-space quantities suffice.
+	// Validated offline against all 13 calsamples_20260816/17_* runs before shipping: the
+	// corrected median reads 0.986-1.001 on every clean run (naive: 0.71-0.88), agrees with
+	// the SVD fit to 0.08-0.44% on the three runs where scale was measured (inside the SVD's
+	// own 0.757% run-to-run sigma), and still honestly reports garbage (0.703) on the
+	// frame-broken 165347 run -- which the rigid-pair gate now discards anyway.
+	//
+	// Needs the lever arm, so the first-ever calibration reports unavailable rather than a
+	// number known to carry the full rotation bias.
+	if (!haveLever)
+		return -1.0;
+
+	std::vector<Eigen::Vector3d> implied;
+	implied.reserve(samples.size());
+	for (auto &s : samples)
+		implied.push_back(s.target.trans + s.target.rot * leverVec);
 
 	std::vector<double> ratios;
 	for (size_t i = 0; i < samples.size(); i++)
@@ -1074,13 +1092,8 @@ static double PairwiseBaselineScale(const std::vector<Sample> &samples, double l
 		for (size_t j = 0; j < i; j++)
 		{
 			const double dRef = (samples[i].ref.trans - samples[j].ref.trans).norm();
-			const double dTgt = (samples[i].target.trans - samples[j].target.trans).norm();
+			const double dTgt = (implied[i] - implied[j]).norm();
 			if (dRef < kMinBaseline || dTgt < kMinBaseline)
-				continue;
-			// RotAngleBetween already clamps into [0, pi]; std::min is unavailable here anyway.
-			const double dTheta = RotAngleBetween(samples[i].target.rot, samples[j].target.rot);
-			const double sweep = 2.0 * leverM * std::sin(dTheta * 0.5);
-			if (sweep > kLeverFrac * (dRef < dTgt ? dRef : dTgt))
 				continue;
 			ratios.push_back(dRef / dTgt);
 		}
@@ -2789,8 +2802,9 @@ void CalibrationTick(double time)
 		// across a few real calibrations, the pairwise estimator is the better primary; if they
 		// diverge, the log says so before anything has been staked on it.
 		g_lastScalePairwise = PairwiseBaselineScale(solveSet,
-			ctx.validRelativeOffset ? Vec3Norm(ctx.relativeTranslation) : 0.10,
-			g_lastScalePairCount);
+			Eigen::Vector3d(ctx.relativeTranslation.v[0], ctx.relativeTranslation.v[1],
+				ctx.relativeTranslation.v[2]),
+			ctx.validRelativeOffset, g_lastScalePairCount);
 		// Sets ctx.hmdScale: to the running average when this run measured scale, or straight
 		// back to the prior when it did not. The translation solve below then runs against the
 		// scale that actually ships, so the two stay consistent.
