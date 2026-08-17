@@ -9,6 +9,71 @@ unreasonable precision from the person doing it.
 
 ---
 
+## Reference-frame breaks, stale driver state, and settings survival (2026-08-16)
+
+From a multi-agent audit of the tracking path plus a day of live sessions. `protocol::Version`
+unchanged at 7. Three defects fixed, and one confident fix reverted the same day — the revert is
+documented here because the reasoning error is more reusable than the fix would have been.
+
+**Calibration now detects that the headset re-localised in the middle of a run.** The solve
+assumed the SLAM space and the lighthouse space stay rigidly related for the whole run, and
+nothing verified it. The existing speed gate structurally cannot: it updates its previous-pose
+reference before rejecting, so on a mid-run origin shift the samples on *both* sides are accepted
+and solved together — and a frozen pose source reads as zero speed, so that gate *preferentially*
+accepts stale samples. The two devices are bolted to the same head, so their displacements can
+differ by no more than the lever arm sweeping through the rotation,
+`| ‖dref‖ − ‖dtgt‖ | ≤ 2·|L|·sin(dθ/2)`, and `|L|` is already known from calibration — the test
+has no free parameter.
+
+What it costs on a streamed headset: in run `165347`, the HMD jumped **0.703 m** while the
+rigidly-mounted tracker moved 0.033 m, after seven samples carrying a bit-identical HMD pose.
+Split at the break, the halves solve cleanly at scale 0.983 and 1.002 — 0.76 m and 3° apart.
+Together they produced 127–237 mm RMS and aborted, losing a 428-sample run with nothing in the
+log explaining why. The silent case is worse: an injected **1 cm** shift passes every existing
+gate (5.3 mm RMS, 0.359% stderr) and writes `hmdScale` **1.22% off** as a *measured* value, frozen
+for the session against a run-to-run σ of 0.757%. Thresholds were set by replaying seven real
+runs — benign runs sit at p99 ≤ 0.009 m and max ≤ 0.034 m — so rejection at 0.020 m and a frame
+break at 0.100 m cost 0–2 samples on good runs and trip only on the two known-bad ones. On a
+break the samples collected so far are discarded and collection restarts; no rigid transform
+reconciles the two halves, so keeping them *is* the bug. New `calibration.log` fields:
+`rej_rigid`, `rej_stale`, `frame_breaks`.
+
+**A same-process driver reload no longer resumes with stale tracker state.** The provider is a
+file-scope global, so member initialisers run once per process, not once per load — `Init()`
+already re-initialises eight members for exactly this reason. `hmdTracker` was not among them,
+despite carrying `enabled`, `trackerID` and the entire calibration, and the overlay cannot correct
+it because its IPC client connects once and has no reconnect path. With OpenVR indices assigned in
+connection order and known to move between sessions on this rig, a stale `trackerID` meant the
+pose-quash could park an arbitrary device at +9001 m with `poseIsValid=true`, silently. This is the
+third member of this shape to be fixed, after the IPC stop latch and the shutdown flag.
+
+**An aborted calibration no longer discards your settings.** Aborting restored the whole profile,
+and profile parsing unconditionally rewrites every Settings/Smoothing field — none of which save at
+the point of change. So an abort silently reverted them while reporting only "Previous calibration
+restored". The damaging one is continuous sync: reverting it makes the next scan push `sync=false`
+to every body device, so they lose drift correction while the UI still shows the setting the user
+chose. Aborts are routine, which made this a recurring and invisible cause of body-vs-view drift.
+
+**`scale_pair` measures scale again.** The logged pairwise cross-check ratioed chords between two
+points ~100 mm apart on a rigid mount, so head rotation swept the tracker through an arc the HMD
+origin never travels and the number reported rotation, not scale — it read 0.78–0.86 against an SVD
+fit of 0.994. It now admits only pairs whose lever sweep is under 1% of the baseline. Still
+log-only; the point is that the open question "is the pairwise estimator the better primary?" is
+now answerable rather than pre-poisoned.
+
+**Reverted: applying the per-model scale constants absolutely.** A change that removed the
+`/ targetModelScale` divisor was shipped and reverted the same day. It looked well-founded —
+hand-tuning the manual scale trim in-headset converged on 1.00350 against a `targetModelScale` of
+1.00340, and that trim does exactly one thing algebraically, which is cancel the divisor. The error
+was not checking whether the knob being tuned could reach the thing being blamed. The head tracker
+is excluded from the device-transform loop *and* the driver's head path applies no scale term at
+all, so the head tracker's raw pose is the anchor of the published frame and the divisor was
+correctly mapping every other device into that metric. Removing it left two physically identical
+tracker units — one on the head, one on the body — in different metrics, which cannot be right
+regardless of what the constants mean. The original observation is still unexplained.
+
+---
+
 ## Calibration accuracy: scale pooling, plateau finish, station-collapsed solve (2026-08-15)
 
 Built after the second base station arrived (HW1) and a measurement pass over 84 logged
