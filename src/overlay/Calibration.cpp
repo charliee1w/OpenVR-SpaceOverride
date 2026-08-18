@@ -1332,6 +1332,14 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 	std::string newTrackerSerial = GetDeviceSerial(targetID);
 	if (!newTrackerSerial.empty())
 		ctx.trackerSerial = newTrackerSerial;
+	else
+		// Audit hardening (so-lts verify pass): keeping the OLD serial while calibrating a
+		// device whose serial did not read can bind the run to a DIFFERENT device than
+		// upstream would have (upstream stored "" and the run degraded loudly downstream).
+		// Selection ambiguity is exactly what the target-pick guard exists to prevent, so
+		// say it in-VR rather than proceeding on a guess.
+		ctx.Log("Warning: tracker serial did not read; calibrating against the previously "
+			"known tracker. If the wrong device moves the view, abort and retry.\n");
 
 	char buf[256];
 	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
