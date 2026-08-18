@@ -13,6 +13,7 @@
 #include <cctype>
 #include <cmath>
 #include <chrono>
+#include <limits>
 
 #include <Dense>
 
@@ -343,6 +344,21 @@ Eigen::Vector3d CalibrateRotation(const std::vector<Sample>& samples)
 	char buf[256];
 	snprintf(buf, sizeof buf, "Got %zd samples with %zd delta samples\n", samples.size(), deltas.size());
 	CalCtx.Log(buf);
+
+	// DEGENERATE-INPUT GUARD (A14). Unreachable once the finish gate has fired with a
+	// real sample set, so it cannot change a happy-path solve. With no usable deltas
+	// the cross-covariance is the zero matrix and the SVD below yields an arbitrary,
+	// identity-like rotation that carries no information but looks confident. Signal
+	// it instead: the NaN propagates through the solve to the residual, which the
+	// `!(rmsError <= 0.1)` gate below rejects.
+	if (deltas.empty())
+	{
+		CalCtx.Log("No usable rotation deltas - head movement was too small to solve rotation.\n");
+		return Eigen::Vector3d(std::numeric_limits<double>::quiet_NaN(),
+			std::numeric_limits<double>::quiet_NaN(),
+			std::numeric_limits<double>::quiet_NaN());
+	}
+
 	Eigen::MatrixXd refPoints(deltas.size(), 3), targetPoints(deltas.size(), 3);
 
 	for (size_t i = 0; i < deltas.size(); i++)
@@ -429,6 +445,17 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 
 static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
 {
+	// DEGENERATE-INPUT GUARD (A14). Unreachable from the live path -- the finish gate
+	// cannot fire on an empty set -- so no happy-path solve changes. Without it the
+	// centroid divides by zero, spread is NaN, `spread < ScaleSpreadThreshold` is FALSE
+	// for NaN, and the function goes on to solve a zero-row system. 1.0 is the same
+	// answer both of upstream's own inconclusive branches already give.
+	if (samples.empty())
+	{
+		CalCtx.Log("No samples to fit headset scale, assuming 1\n");
+		return 1.0;
+	}
+
 	Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
 	for (auto &sample : samples)
 		centroid += rotation * sample.target.trans;
@@ -515,6 +542,11 @@ static double SecondAxisVariance(const std::vector<Sample> &samples)
 
 static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &samples, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
 {
+	// DEGENERATE-INPUT GUARD (A14): unreachable once the finish gate fires; upstream
+	// divided the zero accumulator by zero here.
+	if (samples.empty())
+		return Eigen::Vector3d::Zero();
+
 	Eigen::Vector3d accum = Eigen::Vector3d::Zero();
 
 	for (auto &sample : samples)
@@ -525,6 +557,12 @@ static Eigen::Vector3d ComputeRefToTargetOffset(const std::vector<Sample> &sampl
 
 static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eigen::Vector3d &hmdToTargetPos, const Eigen::Matrix3d &calRot, const Eigen::Vector3d &calTrans, double calScale)
 {
+	// DEGENERATE-INPUT GUARD (A14): unreachable once the finish gate fires. NaN, not
+	// zero -- this value feeds the `!(rmsError <= 0.1)` accept gate, and a zero
+	// residual would read as a perfect fit and be saved.
+	if (samples.empty())
+		return std::numeric_limits<double>::quiet_NaN();
+
 	double accum = 0;
 
 	for (auto &sample : samples)
@@ -532,6 +570,9 @@ static double RetargetingErrorRMS(const std::vector<Sample> &samples, const Eige
 
 	return std::sqrt(accum / (double)samples.size());
 }
+
+// Which device was missing on the last invalid CollectSample, for the abort message.
+static const char *g_lastCollectFailure = nullptr;
 
 Sample CollectSample(const CalibrationContext &ctx)
 {
@@ -542,21 +583,25 @@ Sample CollectSample(const CalibrationContext &ctx)
 	reference = ctx.devicePoses[0];
 	target = ctx.devicePoses[ctx.targetID];
 
-	bool ok = true;
+	// A14. Per-sample math is bit-identical: an invalid pose is never appended in
+	// either build, and a valid pair produces exactly the Sample upstream produced.
+	// What moves out of here is the CONTROL FLOW. Upstream ended the run from inside
+	// this collector -- `state = None` with no restore -- so the first untracked tick
+	// killed the whole calibration AND left the context holding the new trackerSerial /
+	// targetTrackingSystem that BeginSamplingPhase had just written over the old
+	// profile's, with none of the calibrated values reloaded. Report which device is
+	// missing and let the caller decide.
+	//
+	// No logging here: this runs at 20 Hz, and a per-tick message would bury the
+	// in-VR message list.
+	g_lastCollectFailure = nullptr;
 	if (!reference.bPoseIsValid)
-	{
-		CalCtx.Log("Reference device is not tracking\n"); ok = false;
-	}
-	if (!target.bPoseIsValid)
-	{
-		CalCtx.Log("Target device is not tracking\n"); ok = false;
-	}
-	if (!ok)
-	{
-		CalCtx.Log("Aborting calibration!\n");
-		CalCtx.state = CalibrationState::None;
+		g_lastCollectFailure = "Reference device (HMD)";
+	else if (!target.bPoseIsValid)
+		g_lastCollectFailure = "Target device (head tracker)";
+
+	if (g_lastCollectFailure)
 		return Sample();
-	}
 
 	return Sample(
 		Pose(reference.mDeviceToAbsoluteTracking),
@@ -939,12 +984,38 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	}
 }
 
+// A14: tracking-loss bookkeeping. g_lossStart is when the current gap began (0 while
+// tracking); g_lossRunTicks counts the ticks dropped in the current gap.
+static double g_lossStart = 0.0;
+static int g_lossRunTicks = 0;
+
+// How long either device may stay untracked before the run is abandoned.
+//
+// PHASE 1: DELIBERATELY ZERO, per the blueprint. Upstream ends the run on the very
+// first untracked tick (it did so from inside CollectSample), and a coast would let
+// runs complete that upstream would have abandoned -- a different set of datasets
+// reaching the solver, which is NOT output-identical and so does not belong in a
+// keep-guard commit. At 0.0 the run still ends on the first dropped tick, exactly as
+// upstream; what changed is that it ends through AbortAndRestoreProfile, which puts
+// the previous calibration back instead of leaving the context half-overwritten.
+// Raising this to ~2.0 is a one-constant change once there is evidence for it.
+static const double kMaxTrackingLossSec = 0.0;
+
 static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 {
 	ctx.targetID = targetID;
 	ctx.targetTrackingSystem = GetDeviceTrackingSystem(targetID);
 	ctx.hmdSerial = GetDeviceSerial(vr::k_unTrackedDeviceIndex_Hmd);
-	ctx.trackerSerial = GetDeviceSerial(targetID);
+
+	// A14. An empty serial is not a new tracker. GetDeviceSerial discards the
+	// ETrackedPropertyError and returns "" when the property read fails, which is
+	// routine for a device that has just woken or re-enumerated. Upstream stored the
+	// "" unconditionally, which breaks serial-based target recovery in
+	// ScanAndApplyProfile and the connected-tracker check in the UI. On the happy path
+	// the read succeeds and this assigns exactly what upstream assigned.
+	std::string newTrackerSerial = GetDeviceSerial(targetID);
+	if (!newTrackerSerial.empty())
+		ctx.trackerSerial = newTrackerSerial;
 
 	char buf[256];
 	snprintf(buf, sizeof buf, "Using headset tracker: %s (id %d)\n", ctx.trackerSerial.c_str(), targetID);
@@ -955,6 +1026,9 @@ static void BeginSamplingPhase(CalibrationContext &ctx, uint32_t targetID)
 
 	ctx.state = CalibrationState::Sampling;
 	ctx.wantedUpdateInterval = 0.0;
+	g_lossStart = 0.0;
+	g_lossRunTicks = 0;
+	g_lastCollectFailure = nullptr;
 	ctx.Log("Starting calibration...\n");
 }
 
@@ -976,7 +1050,42 @@ static void AbortAndRestoreProfile(CalibrationContext &ctx)
 	if (ctx.targetID != vr::k_unTrackedDeviceIndexInvalid)
 		ResetAndDisableOffsets(ctx.targetID);
 
+	// A14. An abort is supposed to restore the CALIBRATION. LoadProfile restores the
+	// whole profile, and ParseProfile unconditionally rewrites every Settings/Smoothing
+	// field with it -- native, fallbackSlam, eAngVel, continuousSync, predictionTime,
+	// headFilterEnabled, both One-Euro sets, calibration_speed. None of those controls
+	// call SaveProfile at the point of change (persistence happens at solve time or at
+	// overlay exit), so an abort silently threw away whatever the user had just set.
+	//
+	// Not cosmetic: continuousSync reverting to the stored value makes the next 1 Hz
+	// ScanAndApplyProfile push sync=false to every body puck, so the pucks lose drift
+	// correction while the UI still shows the setting the user chose.
+	//
+	// This snapshot touches NO calibrated quantity -- not rotation, translation, scale,
+	// hmdScale, targetModelScale, the rel_* offset or any serial. Those all come back
+	// from the profile exactly as LoadProfile restored them.
+	const bool sNative = ctx.enableNative;
+	const bool sFallback = ctx.fallbackToSlam;
+	const bool sEAngVel = ctx.enableAngularVelocity;
+	const bool sSync = ctx.continuousSync;
+	const float sPred = ctx.predictionTime;
+	const bool sHeadFilt = ctx.headFilterEnabled;
+	const protocol::OneEuroParams sHeadP = ctx.headFilterParams;
+	const protocol::OneEuroParams sDriftP = ctx.driftFilterParams;
+	const CalibrationContext::Speed sSpeed = ctx.calibrationSpeed;
+
 	LoadProfile(ctx);
+
+	ctx.enableNative = sNative;
+	ctx.fallbackToSlam = sFallback;
+	ctx.enableAngularVelocity = sEAngVel;
+	ctx.continuousSync = sSync;
+	ctx.predictionTime = sPred;
+	ctx.headFilterEnabled = sHeadFilt;
+	ctx.headFilterParams = sHeadP;
+	ctx.driftFilterParams = sDriftP;
+	ctx.calibrationSpeed = sSpeed;
+
 	ctx.state = CalibrationState::None;
 	collectedSamples.clear();
 	coplanarRetries = 0;
@@ -1139,7 +1248,38 @@ void CalibrationTick(double time)
 	auto sample = CollectSample(ctx);
 	if (!sample.valid)
 	{
+		// A14: the run now ends HERE, through the restore path, instead of inside
+		// CollectSample with a bare `state = None`. With kMaxTrackingLossSec == 0 this
+		// fires on the first untracked tick, i.e. at exactly the moment upstream ended
+		// the run -- the difference is that the previous calibration comes back.
+		if (g_lossStart == 0.0)
+			g_lossStart = time;
+		++g_lossRunTicks;
+
+		const double lostSec = time - g_lossStart;
+		if (lostSec >= kMaxTrackingLossSec)
+		{
+			char buf[256];
+			snprintf(buf, sizeof buf,
+				"%s stopped tracking - aborting calibration. Previous calibration restored.\n",
+				g_lastCollectFailure ? g_lastCollectFailure : "A device");
+			ctx.Log(buf);
+			AbortAndRestoreProfile(ctx);
+			return;
+		}
+
 		return;
+	}
+
+	if (g_lossRunTicks > 0)
+	{
+		// Recovered inside the coast window. Unreachable while kMaxTrackingLossSec is 0;
+		// kept so raising that constant stays a one-line change.
+		char buf[256];
+		snprintf(buf, sizeof buf, "Tracking recovered after %d dropped ticks, continuing.\n", g_lossRunTicks);
+		ctx.Log(buf);
+		g_lossRunTicks = 0;
+		g_lossStart = 0.0;
 	}
 
 	auto &samples = collectedSamples;
@@ -1197,7 +1337,11 @@ void CalibrationTick(double time)
 		CalCtx.Log(buf2);
 
 		// TODO: this is an problem for future considering automatic calibration fixing.
-		if (rmsError > 0.1)
+		// A14: written as !(x <= limit) rather than `x > limit` so a NaN residual FAILS
+		// the gate. For every finite value the two are the same predicate, so no real
+		// solve changes; `rmsError > 0.1` is false for NaN, which would have let a
+		// degenerate solve through to SaveProfile and into the pose pipeline.
+		if (!(rmsError <= 0.1))
 		{
 			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
 			AbortAndRestoreProfile(ctx);
