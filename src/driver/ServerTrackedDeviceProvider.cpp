@@ -99,6 +99,40 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
 
+	// ACCEPTANCE (why the happy-path output is bit-identical): g_server is a file-scope global
+	// (Main.cpp), so member initialisers run once per PROCESS, not once per driver load. On the
+	// first Init of a process every assignment below is a no-op -- it writes exactly the value
+	// the member initialiser already holds. Steady state is therefore identical; only a
+	// same-process Cleanup->Init differs, and there it restores the state the first Init had.
+	//
+	// hmdTracker is the one with the real blast radius. transforms[] and slamSync[] were
+	// already being cleared here for this reason; hmdTracker was not, so a same-process reload
+	// resumed with enabled==true and the pre-reload trackerID while transforms[] had just been
+	// zeroed. The overlay cannot correct it -- IPCClient connects once from InitCalibrator and
+	// has no reconnect path -- so nothing re-pushes SetHmdTracker and no log line fires. OpenVR
+	// indices are assigned in connection order and are not stable across restarts, so a stale
+	// trackerID rebuilds the HMD from whatever device now holds that index. Coming up inert
+	// until the overlay pushes a fresh SetHmdTracker is what Init already does for everything
+	// else.
+	hmdTracker = {};
+
+	drift.valid = false;
+	drift.rotation = { 1, 0, 0, 0 };
+	drift.translation = { 0, 0, 0 };
+	drift.lastUpdate = {};
+	drift.rotationFilter.reset();
+	drift.translationFilter.reset();
+
+	headFilter.enabled = false;
+	headFilter.lastUpdate = {};
+	headFilter.reset();
+
+	headVel.prevRotation = { 1, 0, 0, 0 };
+	headVel.lastUpdate = {};
+	headVel.reset();
+
+	trackerFilter.reset();
+
 	drift.rotationFilter.params = { 3.0, 1.3, 0.6 };
 	drift.translationFilter.params = { 3.0, 1.3, 0.6 };
 	headFilter.rotationFilter.params = { 5.0, 0.8, 1.0 };
