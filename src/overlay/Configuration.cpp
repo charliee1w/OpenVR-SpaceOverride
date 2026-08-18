@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <ctime>
 
 static picojson::array FloatArray(const float *buf, int numFloats)
 {
@@ -256,6 +257,13 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["scale"].set<double>(ctx.calibratedScale);
 	profile["targetModelScale"].set<double>(ctx.targetModelScale);
 	profile["hmdScale"].set<double>(ctx.hmdScale);
+	// Write-only, by design. ParseProfile ignores unknown keys, and this build's
+	// LoadProfile is registry-only, so nothing reads this back and it cannot select a
+	// calibration. It is recorded now purely so a later, evidence-backed tie-break
+	// between the registry and the mirror has a timestamp to work from. The fork's
+	// newest-savedAt-wins dual-store read is the blueprint's S6 suspect and stays out.
+	double savedAt = (double) std::time(nullptr);
+	profile["savedAt"].set<double>(savedAt);
 
 	profile["native"].set<bool>(ctx.enableNative);
 	profile["fallbackSlam"].set<bool>(ctx.fallbackToSlam);
@@ -355,14 +363,19 @@ static std::string ReadRegistryKey()
 	return str;
 }
 
-static void WriteRegistryKey(std::string str)
+// ACCEPTANCE (A12): the RegCreateKeyExA / RegSetValueExA pair is untouched -- same
+// key, same value name, same REG_SZ, same size -- so the bytes landing in the
+// registry are byte-identical to upstream's. The read-back is a pure check with no
+// side effect; only the return value is new. Upstream reported a failed write to
+// stderr only, which is invisible for a windowed app, and callers could not tell.
+static bool WriteRegistryKey(std::string str)
 {
 	HKEY hkey;
 	auto result = RegCreateKeyExA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, 0, REG_NONE, 0, KEY_ALL_ACCESS, 0, &hkey, 0);
 	if (result != ERROR_SUCCESS)
 	{
 		LogRegistryResult(result);
-		return;
+		return false;
 	}
 
 	DWORD size = str.size() + 1;
@@ -372,6 +385,39 @@ static void WriteRegistryKey(std::string str)
 		LogRegistryResult(result);
 
 	RegCloseKey(hkey);
+
+	if (result != ERROR_SUCCESS)
+		return false;
+
+	return ReadRegistryKey() == str;
+}
+
+static std::string BackupFilePath()
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return "";
+	return std::string(localAppData) + "\\OpenVR-SpaceOverride\\profile-backup.json";
+}
+
+// ACCEPTANCE (A12): WRITE SIDE ONLY. This mirrors the exact string already written to
+// the registry into a file that nothing in this build reads back -- LoadProfile stays
+// registry-only, deliberately, because the fork's newest-savedAt-wins dual-store read
+// is the blueprint's S6 accuracy suspect and is dropped. So the mirror cannot change
+// which calibration is loaded; it exists so a lost registry key is recoverable by hand.
+static void WriteBackupFile(const std::string &str)
+{
+	std::string path = BackupFilePath();
+	if (path.empty())
+		return;
+
+	std::string dir = path.substr(0, path.find_last_of('\\'));
+	CreateDirectoryA(dir.c_str(), nullptr);
+
+	std::ofstream out(path, std::ios::trunc);
+	if (out)
+		out << str;
 }
 
 void LoadProfile(CalibrationContext &ctx)
@@ -410,7 +456,13 @@ void RemoveProfile(CalibrationContext &ctx)
 	if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND)
 		LogRegistryResult(result);
 
-	std::cout << "Removed calibration profile" << std::endl;
+	// The mirror is write-only and never loaded, but leaving a deleted profile lying
+	// on disk under a "Remove Calibration" button is a lie. Delete both stores.
+	std::string backup = BackupFilePath();
+	if (!backup.empty())
+		DeleteFileA(backup.c_str());
+
+	std::cout << "Removed calibration profile (registry + backup)" << std::endl;
 }
 
 void SaveProfile(CalibrationContext &ctx)
@@ -432,5 +484,22 @@ void SaveProfile(CalibrationContext &ctx)
 
 	std::stringstream io;
 	WriteProfile(ctx, io);
-	WriteRegistryKey(io.str());
+	const std::string str = io.str();
+
+	const bool registryOk = WriteRegistryKey(str);
+	WriteBackupFile(str);
+
+	if (registryOk)
+	{
+		std::cout << "Saved profile (registry + backup)" << std::endl;
+	}
+	else
+	{
+		// Not fatal, but it must not be silent: the registry is the only store
+		// LoadProfile reads, so an unverified write means the next launch will come
+		// back with the previous calibration. profile-backup.json holds what this
+		// save intended.
+		std::cerr << "WARNING: registry profile write did not verify - "
+			<< "profile-backup.json holds the current calibration" << std::endl;
+	}
 }
