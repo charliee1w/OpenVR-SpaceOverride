@@ -175,9 +175,23 @@ int main(int argc, char** argv)
     try {
         g_overlay->Create(vr::VROverlayType_Dashboard, APP_KEY, APP_NAME);
 
-        std::string thumbnail_path = SDL_GetBasePath();
-        thumbnail_path += "\\icon.png";
-        g_overlay->SetThumbnail(thumbnail_path);
+        // ACCEPTANCE (A8): the dashboard thumbnail is the cosmetic SteamVR tray
+        // icon and nothing downstream reads it, so this cannot move a calibrated
+        // quantity. SDL_GetBasePath() already ends with a path separator, so the
+        // resolved file is the same one upstream opened (appending "\\icon.png"
+        // merely produced a harmless double separator). What changes is only the
+        // failure case: a missing icon, an unwritable path or a null base path
+        // (std::string from nullptr is UB) no longer aborts startup.
+        try {
+            const char* base = SDL_GetBasePath();
+            if (base) {
+                std::string thumbnail_path = std::string(base) + "icon.png";
+                g_overlay->SetThumbnail(thumbnail_path);
+            }
+        }
+        catch (std::exception& ex) {
+            fprintf(stderr, "Non-fatal: could not set dashboard thumbnail: %s\n", ex.what());
+        }
 
         g_overlay->SetInputMethod(vr::VROverlayInputMethod_Mouse);
         g_overlay->SetWidth(3.0f);
