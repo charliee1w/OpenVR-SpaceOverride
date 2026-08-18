@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <chrono>
 
 #include <Dense>
 
@@ -19,9 +20,124 @@
 static IPCClient Driver;
 CalibrationContext CalCtx;
 
+// ---------------------------------------------------------------------------
+// A13: desired driver state, written once instead of disable-then-enable.
+//
+// ACCEPTANCE (why the happy-path output is bit-identical): the TERMINAL state
+// per device after a scan is provably identical in all six branches of
+// ScanAndApplyProfile -- HMD -> disabled; !enabled -> disabled; property error
+// -> disabled; the target head tracker -> disabled; same tracking system ->
+// enabled with the UNCHANGED deviceScale = calibratedScale * model(id) /
+// targetModelScale; different tracking system -> disabled. The messages the
+// driver ends up holding are byte-for-byte upstream's. What disappears is the
+// sub-millisecond window each second in which upstream had every device
+// disabled, because it sent RequestSetDeviceTransform(enabled=false) to all of
+// them and only then re-enabled the ones that should be on. That window raced
+// the pose thread and briefly published uncalibrated poses.
+//
+// Upstream re-sent unconditionally every ~1 s, so it could not desynchronise
+// from the driver. A cache can, so every site where the driver drops state
+// this cache claims to know must invalidate it -- see InitCalibrator (fresh
+// pipe), the slamSync wipe in SendHmdTrackerCommand (disable), the not-known
+// on send failure in each sender, and the unconditional 60 s re-send below.
+// ---------------------------------------------------------------------------
+struct AppliedDeviceTransform
+{
+	bool known = false;
+	bool enabled = false;
+	vr::HmdVector3d_t translation = { 0, 0, 0 };
+	vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+	double scale = 1.0;
+};
+
+static AppliedDeviceTransform g_appliedTf[vr::k_unMaxTrackedDeviceCount];
+static bool g_appliedSlamKnown[vr::k_unMaxTrackedDeviceCount];
+static bool g_appliedSlam[vr::k_unMaxTrackedDeviceCount];
+static protocol::SetHmdTracker g_appliedHmd{};
+static bool g_appliedHmdKnown = false;
+static protocol::SetOneEuro g_appliedOneEuro{};
+static bool g_appliedOneEuroKnown = false;
+
+static void InvalidateAppliedDriverState()
+{
+	for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+	{
+		g_appliedTf[i] = AppliedDeviceTransform{};
+		g_appliedSlamKnown[i] = false;
+		g_appliedSlam[i] = false;
+	}
+	g_appliedHmdKnown = false;
+	g_appliedOneEuroKnown = false;
+}
+
+// Belt-and-braces, blueprint-mandated. Every known way for the cache to fall out
+// of step with the driver is invalidated explicitly, but "every known way" is a
+// claim about defects we have found. Upstream's unconditional re-send made this
+// class of bug structurally impossible; a full push once a minute bounds any
+// unknown instance to <= 60 s instead of "for the life of the overlay process",
+// at a cost of ~70 pipe writes per minute on a scan loop that already runs 1 Hz.
+static const double kFullResendIntervalSec = 60.0;
+
+static void MaybeForceFullResend()
+{
+	static std::chrono::steady_clock::time_point lastFullResend{};
+	static bool haveMark = false;
+
+	const auto now = std::chrono::steady_clock::now();
+	if (haveMark && std::chrono::duration<double>(now - lastFullResend).count() < kFullResendIntervalSec)
+		return;
+
+	InvalidateAppliedDriverState();
+	lastFullResend = now;
+	haveMark = true;
+}
+
+static bool ApproxEq(double a, double b, double eps = 1e-9)
+{
+	return std::fabs(a - b) <= eps;
+}
+
+static bool VecEq(const vr::HmdVector3d_t &a, const vr::HmdVector3d_t &b)
+{
+	return ApproxEq(a.v[0], b.v[0]) && ApproxEq(a.v[1], b.v[1]) && ApproxEq(a.v[2], b.v[2]);
+}
+
+static bool QuatEq(const vr::HmdQuaternion_t &a, const vr::HmdQuaternion_t &b)
+{
+	// Same rotation if equal or negated (q and -q).
+	bool same = ApproxEq(a.w, b.w) && ApproxEq(a.x, b.x) && ApproxEq(a.y, b.y) && ApproxEq(a.z, b.z);
+	bool neg = ApproxEq(a.w, -b.w) && ApproxEq(a.x, -b.x) && ApproxEq(a.y, -b.y) && ApproxEq(a.z, -b.z);
+	return same || neg;
+}
+
+static bool HmdTrackerEq(const protocol::SetHmdTracker &a, const protocol::SetHmdTracker &b)
+{
+	return a.hmdID == b.hmdID
+		&& a.trackerID == b.trackerID
+		&& a.enabled == b.enabled
+		&& a.native == b.native
+		&& a.slamFallback == b.slamFallback
+		&& a.enableAngularVelocity == b.enableAngularVelocity
+		&& ApproxEq(a.predictionTime, b.predictionTime, 1e-4)
+		&& QuatEq(a.offsetRotation, b.offsetRotation)
+		&& VecEq(a.offsetTranslation, b.offsetTranslation)
+		&& QuatEq(a.calibrationRotation, b.calibrationRotation)
+		&& VecEq(a.calibrationTranslation, b.calibrationTranslation)
+		&& ApproxEq(a.calibrationScale, b.calibrationScale)
+		&& ApproxEq(a.hmdScale, b.hmdScale);
+}
+
+static bool OneEuroEq(const protocol::OneEuroParams &a, const protocol::OneEuroParams &b)
+{
+	return ApproxEq(a.minCutoff, b.minCutoff) && ApproxEq(a.beta, b.beta) && ApproxEq(a.dCutoff, b.dCutoff);
+}
+
 void InitCalibrator()
 {
 	Driver.Connect();
+	// The driver is fresh after connect and holds none of the state this cache
+	// remembers; force a full push on the next scan.
+	InvalidateAppliedDriverState();
 }
 
 struct Pose
@@ -475,6 +591,60 @@ vr::HmdVector3d_t VRTranslationVec(Eigen::Vector3d transcm)
 	return vrTrans;
 }
 
+// A13. The message built here is byte-for-byte the one upstream built at each call
+// site -- the same six-argument SetDeviceTransform constructor, the same zero
+// vector / identity quaternion / 1.0 scale on the disable path. Only the decision
+// to send it at all is new.
+static void ApplyDeviceTransform(uint32_t id, bool enabled, const vr::HmdVector3d_t &translation,
+	const vr::HmdQuaternion_t &rotation, double scale)
+{
+	if (id >= vr::k_unMaxTrackedDeviceCount)
+		return;
+
+	auto &prev = g_appliedTf[id];
+	if (prev.known
+		&& prev.enabled == enabled
+		&& (!enabled || (VecEq(prev.translation, translation) && QuatEq(prev.rotation, rotation) && ApproxEq(prev.scale, scale))))
+	{
+		return;
+	}
+
+	protocol::Request req(protocol::RequestSetDeviceTransform);
+	if (enabled)
+		req.setDeviceTransform = { id, true, translation, rotation, scale };
+	else
+	{
+		vr::HmdVector3d_t zeroV;
+		zeroV.v[0] = zeroV.v[1] = zeroV.v[2] = 0;
+
+		vr::HmdQuaternion_t zeroQ;
+		zeroQ.x = 0; zeroQ.y = 0; zeroQ.z = 0; zeroQ.w = 1;
+
+		req.setDeviceTransform = { id, false, zeroV, zeroQ, 1.0 };
+	}
+
+	// SendBlocking throws on a broken pipe, and this runs on the overlay main loop
+	// with no handler above it -- an uncaught throw is std::terminate, killing the
+	// overlay before its exit-time SaveProfile. A pipe break happens precisely when
+	// the driver goes away (SteamVR shutdown, driver reload). On failure the cache is
+	// left NOT-known so the next scan re-sends: caching a send that never arrived is
+	// the silent-desync class this commit exists to prevent.
+	try
+	{
+		Driver.SendBlocking(req);
+		prev.known = true;
+		prev.enabled = enabled;
+		prev.translation = translation;
+		prev.rotation = rotation;
+		prev.scale = scale;
+	}
+	catch (const std::runtime_error &e)
+	{
+		prev.known = false;
+		std::cerr << "Failed to send device transform for id " << id << ": " << e.what() << std::endl;
+	}
+}
+
 void ResetAndDisableOffsets(uint32_t id)
 {
 	vr::HmdVector3d_t zeroV;
@@ -483,9 +653,7 @@ void ResetAndDisableOffsets(uint32_t id)
 	vr::HmdQuaternion_t zeroQ;
 	zeroQ.x = 0; zeroQ.y = 0; zeroQ.z = 0; zeroQ.w = 1;
 
-	protocol::Request req(protocol::RequestSetDeviceTransform);
-	req.setDeviceTransform = { id, false, zeroV, zeroQ, 1.0 };
-	Driver.SendBlocking(req);
+	ApplyDeviceTransform(id, false, zeroV, zeroQ, 1.0);
 }
 
 void SendOneEuroParams()
@@ -495,12 +663,24 @@ void SendOneEuroParams()
 	req.setOneEuro.head = CalCtx.headFilterParams;
 	req.setOneEuro.drift = CalCtx.driftFilterParams;
 
+	// A13: same message, sent only when it would change what the driver holds.
+	if (g_appliedOneEuroKnown
+		&& g_appliedOneEuro.headEnabled == req.setOneEuro.headEnabled
+		&& OneEuroEq(g_appliedOneEuro.head, req.setOneEuro.head)
+		&& OneEuroEq(g_appliedOneEuro.drift, req.setOneEuro.drift))
+	{
+		return;
+	}
+
 	try
 	{
 		Driver.SendBlocking(req);
+		g_appliedOneEuro = req.setOneEuro;
+		g_appliedOneEuroKnown = true;
 	}
 	catch (const std::runtime_error &e)
 	{
+		g_appliedOneEuroKnown = false;
 		std::cerr << "Failed to send One Euro params: " << e.what() << std::endl;
 	}
 }
@@ -521,7 +701,44 @@ void SendHmdTrackerCommand(uint32_t hmdID, uint32_t trackerID, bool enabled)
 	req.setHmdTracker.calibrationTranslation = VRTranslationVec(CalCtx.calibratedTranslation);
 	req.setHmdTracker.calibrationScale = CalCtx.calibratedScale;
 	req.setHmdTracker.hmdScale = CalCtx.hmdScale;
-	Driver.SendBlocking(req);
+
+	// A13: same message, sent only when it would change what the driver holds.
+	if (g_appliedHmdKnown && HmdTrackerEq(g_appliedHmd, req.setHmdTracker))
+		return;
+
+	// Upstream let SendBlocking throw out of here; the only call sites are on the
+	// overlay main loop with no handler above them.
+	try
+	{
+		Driver.SendBlocking(req);
+		g_appliedHmd = req.setHmdTracker;
+		g_appliedHmdKnown = true;
+	}
+	catch (const std::runtime_error &e)
+	{
+		g_appliedHmdKnown = false;
+		std::cerr << "Failed to send SetHmdTracker: " << e.what() << std::endl;
+		return;
+	}
+
+	// CACHE-INVALIDATION SITE (A13, the recorded live failure fa7dc28). A disable
+	// makes the driver wipe its slamSync set: the SetHmdTracker handler runs
+	// ResetEstimators with clearSlamSync, which memsets the whole array. This cache
+	// cannot see that happen, and the re-enrolment loop in ScanAndApplyProfile is
+	// guarded on `overrideActive`, so it does not run while the override is off
+	// either. Without this wipe the cache still claims every device is enrolled, so
+	// when the override comes back every id hits `continue` and no SetSlamSync is
+	// ever re-sent -- the body pucks then run with no drift correction while the UI
+	// shows Continuous Sync on. Upstream re-sent unconditionally each scan, so it
+	// could not reach this state.
+	if (!enabled)
+	{
+		for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+		{
+			g_appliedSlamKnown[i] = false;
+			g_appliedSlam[i] = false;
+		}
+	}
 }
 
 // https://stackoverflow.com/questions/12374087/average-of-multiple-quaternions/27410865
@@ -574,6 +791,11 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	char buffer[vr::k_unMaxPropertyStringSize];
 	ctx.enabled = ctx.validProfile;
 
+	// A13 belt-and-braces: once a minute this scan pushes everything regardless of
+	// the cache, restoring upstream's "cannot desynchronise" property with a 60 s
+	// bound instead of a 1 s one.
+	MaybeForceFullResend();
+
 	if (ctx.enabled)
 	{
 		ctx.targetID = vr::k_unTrackedDeviceIndexInvalid;
@@ -592,46 +814,62 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		}
 	}
 
+	// A13: write the desired transform once per device. Do NOT disable-all and then
+	// re-enable -- that races the pose thread and briefly publishes uncalibrated
+	// poses. The terminal state of each of the six branches below is exactly the
+	// terminal state upstream reached after its disable-then-maybe-enable pair.
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 
-		// The headset is driven from the tracker, so every device keeps its raw pose;
-		// clear any space-warp offset that an older profile may have applied.
-		ResetAndDisableOffsets(id);
+		// The HMD pose is replaced from the head tracker; never space-warp it.
+		// (Upstream reached the same terminal state via ResetAndDisableOffsets
+		// followed by the `id == HMD` continue.)
+		if (id == vr::k_unTrackedDeviceIndex_Hmd)
+		{
+			ResetAndDisableOffsets(id);
+			continue;
+		}
 
 		if (!ctx.enabled)
+		{
+			ResetAndDisableOffsets(id);
 			continue;
+		}
 
 		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
 
 		if (err != vr::TrackedProp_Success)
+		{
+			ResetAndDisableOffsets(id);
 			continue;
+		}
 
 		std::string trackingSystem(buffer);
 
-		if (id == vr::k_unTrackedDeviceIndex_Hmd)
-			continue;
-
+		// The head-mounted tracker is the HMD's pose source; keep its raw pose.
 		if (deviceClass == vr::TrackedDeviceClass_GenericTracker && trackingSystem == ctx.targetTrackingSystem && id == ctx.targetID)
 		{
+			ResetAndDisableOffsets(id);
 			continue;
 		}
 
 		if (trackingSystem == ctx.targetTrackingSystem) {
+			// Unchanged, deliberately: same operands, same order, same divisor.
 			double deviceScale = ctx.calibratedScale * GetLighthouseModelScale(id) / ctx.targetModelScale;
-			protocol::Request req(protocol::RequestSetDeviceTransform);
-			req.setDeviceTransform = {
+			ApplyDeviceTransform(
 				id,
 				true,
 				VRTranslationVec(ctx.calibratedTranslation),
 				VRRotationQuat(ctx.calibratedRotation),
-				deviceScale
-			};
-			Driver.SendBlocking(req);
+				deviceScale);
+		}
+		else
+		{
+			ResetAndDisableOffsets(id);
 		}
 	}
 
@@ -654,9 +892,26 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			sync = err == vr::TrackedProp_Success && std::string(buffer) != ctx.targetTrackingSystem;
 		}
 
+		if (g_appliedSlamKnown[id] && g_appliedSlam[id] == sync)
+			continue;
+
 		protocol::Request req(protocol::RequestSetSlamSync);
 		req.setSlamSync = { id, sync };
-		Driver.SendBlocking(req);
+		// Same broken-pipe hazard as the device transform above, same cache rule on
+		// failure. One failure means the pipe is dead for all of them, so stop the
+		// loop rather than throwing up to 60 more times in this scan.
+		try
+		{
+			Driver.SendBlocking(req);
+			g_appliedSlamKnown[id] = true;
+			g_appliedSlam[id] = sync;
+		}
+		catch (const std::runtime_error &e)
+		{
+			g_appliedSlamKnown[id] = false;
+			std::cerr << "Failed to send SetSlamSync for id " << id << ": " << e.what() << std::endl;
+			break;
+		}
 	}
 
 	if (overrideActive)
