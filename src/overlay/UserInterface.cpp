@@ -259,7 +259,13 @@ void UserInterface::Render(bool runningInOverlay)
 			float footerHeight = ImGui::GetTextLineHeightWithSpacing() * (runningInOverlay ? 2.0f : 1.0f);
 			ImGui::SetCursorPos(ImVec2(10.0f, ImGui::GetWindowHeight() - footerHeight - style.WindowPadding.y));
 			ImGui::BeginChild("##bottom_line", ImVec2(ImGui::GetWindowWidth() - 20.0f, footerHeight), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-			ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " - by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
+			// Build identity in the footer. Upstream's credits are unchanged; the variant
+			// tag is appended so the running stack can be named from inside the headset.
+			// Three builds of this codebase get swapped into the same SteamVR install and
+			// they share protocol version 7, so a mismatched pair connects and runs
+			// instead of refusing -- "which build is this?" is otherwise unanswerable
+			// without leaving VR.
+			ImGui::Text("OpenVR-SpaceOverride v" SPACECAL_VERSION_STRING " (" SPACECAL_BUILD_VARIANT ") - by Nyabsi (Special thanks to tach/pushrax for OpenVR-SpaceCalibrator)");
 			if (runningInOverlay)
 			{
 				ImGui::Text("close VR overlay to use mouse");

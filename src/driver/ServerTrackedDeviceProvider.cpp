@@ -145,7 +145,9 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
 
 	OpenLogFile();
-	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " loaded");
+	// Names the build in the first line of every session log, so a log can be attributed
+	// to a stack without cross-checking a DLL hash against a deploy manifest.
+	LOG("OpenVR-SpaceOverride " SPACECAL_VERSION_STRING " (" SPACECAL_BUILD_VARIANT ") loaded");
 
 	memset(transforms, 0, vr::k_unMaxTrackedDeviceCount * sizeof(DeviceTransform));
 	memset(slamSync, 0, sizeof slamSync);
