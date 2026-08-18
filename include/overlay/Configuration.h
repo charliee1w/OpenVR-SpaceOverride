@@ -6,3 +6,6 @@
 
 void LoadProfile(CalibrationContext &ctx);
 void SaveProfile(CalibrationContext &ctx);
+// Clears the context and deletes the stored profile. SaveProfile cannot express deletion,
+// because it refuses to persist an invalid profile by design.
+void RemoveProfile(CalibrationContext &ctx);

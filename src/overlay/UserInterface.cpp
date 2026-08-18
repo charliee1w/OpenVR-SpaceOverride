@@ -152,8 +152,9 @@ void UserInterface::Render(bool runningInOverlay)
 					ImGui::SameLine();
 					if (ImGui::Button("Remove Calibration", ImVec2(buttonWidth, ImGui::GetTextLineHeight() * 2)))
 					{
-						CalCtx.Clear();
-						SaveProfile(CalCtx);
+						// Clear() + SaveProfile no longer deletes anything now that
+						// SaveProfile refuses to persist an invalid profile (A10).
+						RemoveProfile(CalCtx);
 					}
 				}
 

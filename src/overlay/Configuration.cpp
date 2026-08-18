@@ -318,8 +318,36 @@ void LoadProfile(CalibrationContext &ctx)
 	}
 }
 
+void RemoveProfile(CalibrationContext &ctx)
+{
+	// Deliberate deletion. SaveProfile now refuses to write an invalid profile, which
+	// also means the Remove button would silently do nothing: Clear() invalidates the
+	// profile, SaveProfile declines to persist it, and the old registry value survives
+	// the restart. Removal therefore has to clear the store explicitly.
+	ctx.Clear();
+
+	LSTATUS result = RegDeleteKeyValueA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, "Config");
+	if (result != ERROR_SUCCESS && result != ERROR_FILE_NOT_FOUND)
+		LogRegistryResult(result);
+
+	std::cout << "Removed calibration profile" << std::endl;
+}
+
 void SaveProfile(CalibrationContext &ctx)
 {
+	// ACCEPTANCE (A10): identical whenever validProfile is true, which is every save
+	// that follows a solve or an edit -- WriteProfile's own first statement is the
+	// same test, so the serialized bytes and the registry write are unchanged.
+	// What changes is only the invalid case. Upstream's WriteProfile early-returned
+	// leaving the stream EMPTY, and SaveProfile then wrote that empty string to the
+	// registry, wiping a good calibration on any invalid-context save -- including the
+	// unconditional exit-time SaveProfile in Main.cpp.
+	if (!ctx.validProfile)
+	{
+		std::cout << "Skipping profile save (no valid profile)" << std::endl;
+		return;
+	}
+
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream io;
