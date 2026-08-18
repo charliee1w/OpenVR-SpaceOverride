@@ -257,6 +257,17 @@ bool FusionEkfUpdate(PoseState& state, PoseDiag& diag, const PoseConfig& cfg, co
 	const double St = ekf.Pt + Rt;
 	const double Stheta = ekf.Ptheta + Rtheta;
 
+	// The Mahalanobis gate FAILS OPEN on a non-finite innovation: NaN > gateT is false, so a
+	// NaN observation was ACCEPTED, latched into ekf.trans/yawCorr, and stayed there for the
+	// session — every isfinite check downstream guards the published pose, not the filter
+	// state, so the filter never recovered. No such input has been observed on this rig (the
+	// hook cache and prediction paths are finite-checked), so this is hardening against an
+	// external garbage sample, not an active defect — but the latch is permanent, and the
+	// cost of rejecting is one skipped update. Skip WITHOUT counting toward the outlier run:
+	// five NaNs must not trigger a covariance reset that re-anchors from the sixth.
+	if (!std::isfinite(r0sq) || !std::isfinite(rTheta) || !std::isfinite(St) || !std::isfinite(Stheta))
+		return false;
+
 	if (ekf.valid && (r0sq / St) > gateT)
 	{
 		bool reset = false;

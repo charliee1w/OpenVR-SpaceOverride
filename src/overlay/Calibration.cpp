@@ -165,6 +165,15 @@ static int g_rejRigidCount = 0;
 static int g_rejStaleCount = 0;
 static int g_frameBreakCount = 0;
 
+// Raw-sample spread at finish time. The finish gate tests THIS quantity against
+// ScaleSpreadThreshold, but the scale fit recomputes spread over the station-collapsed
+// solve set and gates on that — so a run can pass the finish gate and still land in the
+// kept_low_spread branch with no visible reason. Logged as spread_raw= beside spread_m=
+// (which carries the solve-set value after a solve) so the divergence between the two
+// gates is measurable before deciding whether to unify them (audit 2026-08-16,
+// refuter-confirmed; conservative failure — scale kept, not corrupted — measurement first).
+static double g_lastFinishSpread = 0.0;
+
 static double RotAngleBetween(const Eigen::Matrix3d &a, const Eigen::Matrix3d &b);
 
 // windows.h defines min/max as macros in this TU, so std::min does not compile here.
@@ -188,6 +197,7 @@ static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *res
 		<< "  stations=" << stations
 		<< "  target=" << g_lastSampleTarget
 		<< "  spread_m=" << spreadM
+		<< "  spread_raw=" << g_lastFinishSpread
 		<< "  axis_var=" << std::setprecision(6) << axisVar
 		<< "  rej_ang=" << rejAng
 		<< "  rej_lin=" << rejLin
@@ -223,6 +233,7 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 	out << std::setprecision(5)
 		<< "  rms_mm=" << std::setprecision(1) << rmsErrorMm
 		<< "  spread_m=" << std::setprecision(3) << spreadM
+		<< "  spread_raw=" << g_lastFinishSpread
 		<< "  hmdScale=" << std::setprecision(5) << ctx.hmdScale
 		<< "  targetModelScale=" << ctx.targetModelScale
 		<< "  speed=" << (int)ctx.calibrationSpeed
@@ -2583,23 +2594,25 @@ void CalibrationTick(double time)
 		if (!atSampleCap)
 			g_station.index = g_stationCount++;
 	}
-	else if (g_station.count >= kMaxSamplesPerStation)
+	bool redundantSample = false;
+	if (!newStation && g_station.count >= kMaxSamplesPerStation && !atSampleCap)
 	{
-		// Redundant pose. At the sample cap, fall through so we can force-finish;
-		// otherwise nudge and wait for a new station.
-		if (!atSampleCap)
+		// Redundant pose: don't append, but DO fall through to the finish logic below. This
+		// used to `return`, which meant the plateau finish and its 20 s ceiling were only ever
+		// evaluated on an APPENDED sample — a user who completed coverage and then held still
+		// (exactly what the sampleHint tells them to do) parked in a saturated station and the
+		// run could not finish until they moved again. Audit 2026-08-16, refuter-verified:
+		// no other exit existed.
+		redundantSample = true;
+		if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
 		{
-			if ((time - g_lastHintTime) > 0.3 && (time - g_lastFastDropTime) > 0.8)
-			{
-				g_lastHintTime = time;
-				ctx.sampleHint = "Got this spot - move somewhere else, or look a different way";
-				ctx.sampleHintLevel = 1;
-			}
-			return;
+			g_lastHintTime = time;
+			ctx.sampleHint = "Got this spot - move somewhere else, or look a different way";
+			ctx.sampleHintLevel = 1;
 		}
 	}
 
-	if (!atSampleCap)
+	if (!atSampleCap && !redundantSample)
 	{
 		g_station.count++;
 		g_sampleStation.push_back(g_station.index);
@@ -2618,6 +2631,7 @@ void CalibrationTick(double time)
 	g_lastSampleTarget = stationTarget;
 	g_lastAxisVariance = axisNow;
 	g_lastScaleSpread = spreadNow;
+	g_lastFinishSpread = spreadNow;   // survives the solve's overwrite of g_lastScaleSpread
 
 	// (std::min) avoids Windows.h min/max macros.
 	const double stationDenom = stationTarget > 0 ? (double)stationTarget : 1.0;

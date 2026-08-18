@@ -152,9 +152,14 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		if (o["dCutoff"].is<double>())   out.dCutoff = o["dCutoff"].get<double>();
 	};
 
-	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : true;
-	loadOneEuro("headFilter", ctx.headFilterParams, { 2.0, 0.5, 1.0 });
-	loadOneEuro("driftFilter", ctx.driftFilterParams, { 1.0, 0.4, 0.85 });
+	// Missing-key fallbacks MUST match the CalibrationContext member defaults (Calibration.h) —
+	// they had drifted three retunings behind and, worse, fell back to headFilterEnabled=true
+	// against a member default of false and the settings-v1 decision (2026-07-01) that the head
+	// filter ships OFF. A profile written before these keys existed therefore silently
+	// re-enabled the head One-Euro with stale parameters on every load.
+	ctx.headFilterEnabled = obj["headFilterEnabled"].is<bool>() ? obj["headFilterEnabled"].get<bool>() : false;
+	loadOneEuro("headFilter", ctx.headFilterParams, { 5.0, 0.8, 1.0 });
+	loadOneEuro("driftFilter", ctx.driftFilterParams, { 3.0, 1.3, 0.6 });
 
 	// All seven or none: rel_qw alone used to admit the block and the remaining six were then
 	// read unchecked.
