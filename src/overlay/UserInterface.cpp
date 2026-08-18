@@ -26,7 +26,10 @@ void UserInterface::Render(bool runningInOverlay)
 {
 	auto textWithWidth = [](const char *label, const char *text, float width) {
 		ImGui::BeginChild(label, ImVec2(width, ImGui::GetTextLineHeightWithSpacing()));
-		ImGui::Text(text);
+		// A15: `text` is the format string in upstream's call. Rendered output is
+		// identical for any string without a '%', which is every literal this helper is
+		// called with today.
+		ImGui::Text("%s", text);
 		ImGui::EndChild();
 	};
 
@@ -273,7 +276,13 @@ void UserInterface::Render(bool runningInOverlay)
 					switch (message.type)
 					{
 					case CalibrationContext::Message::String:
-						ImGui::TextWrapped(message.str.c_str());
+						// A15. This one is not hypothetical: message.str embeds
+						// device-reported strings via CalCtx.Log() -- serial numbers from
+						// BeginSamplingPhase, tracking-system names -- and upstream passed
+						// the whole thing as ImGui's FORMAT argument. A device string
+						// containing "%s" or "%n" reads or writes through the varargs.
+						// Rendered output is identical for any string without a '%'.
+						ImGui::TextWrapped("%s", message.str.c_str());
 						break;
 					case CalibrationContext::Message::Progress:
 						float fraction = (float)message.progress / (float)message.target;
