@@ -14,12 +14,217 @@
 #include <cmath>
 #include <chrono>
 #include <limits>
+#include <fstream>
+#include <iomanip>
+
+#include <windows.h>
 
 #include <Dense>
 
 
 static IPCClient Driver;
 CalibrationContext CalCtx;
+
+// ---------------------------------------------------------------------------
+// B3: calibration.log and raw sample dumps.
+//
+// ACCEPTANCE (why the happy-path output is bit-identical): everything in this
+// block is write-only. The statics below are assigned inside the solver and read
+// back only by the two log writers; no solver, gate or published value ever reads
+// one. The writers take const references, allocate their own streams, and are
+// called at points where the calibration result is already final. Removing every
+// line of it would leave the same profile, the same driver messages and the same
+// poses -- only the files on disk would differ.
+//
+// Why it exists: a calibration result lived only in the overlay's in-VR message
+// list, so it vanished when the list scrolled or the overlay closed. When two
+// calibrations disagree -- which is the whole question this fork exists to
+// settle -- there was nothing to compare. calibration.log gives one appended line
+// per run, success or failure; the .jsonl dumps give the solver's actual input so
+// a run can be re-solved offline against a different estimator.
+//
+// Deliberately absent versus the fork's version of this file: the split-half
+// rotation agreement check (two extra O(N^2) solves per second on the overlay
+// main loop) and every station/pooling field, none of which exist here.
+// ---------------------------------------------------------------------------
+
+// Where the shipped headset scale came from. The value alone cannot show this: a
+// measured 0.996 and a defaulted 1.0 look like ordinary numbers, and upstream has
+// three separate branches that silently return 1.0. Written at each exit of
+// EstimateHmdSpaceScale, read only by LogCalibrationResult.
+static const char *g_lastScaleSource = "unknown";
+// The scale this run actually fitted, including a fit that was then rejected as
+// implausible (-1 when no fit was attempted). The rejected value is the useful
+// one: it says how far off the solve was, which "assuming 1" does not.
+static double g_lastScaleRaw = -1.0;
+// Positional spread of the target samples, in metres, as computed by the scale
+// fit. Logged because it is the quantity the scale_src="low_spread" branch tested
+// against ScaleSpreadThreshold -- without it that outcome has no number.
+static double g_lastScaleSpread = 0.0;
+
+// How far the calibration tips the vertical axis, in degrees. Both spaces are
+// gravity-levelled, so the true relative rotation has yaw as its only free degree
+// of freedom and this should be ~0; what it actually is, is tilt -- either solver
+// noise or a genuinely un-level room, which repeated runs tell apart.
+//
+// MEASURED, NOT APPLIED. This build keeps upstream's solved rotation exactly as
+// solved, tilt included; the number is recorded so the question "is the tilt in
+// this room real, or is it noise?" can be settled from the log instead of from a
+// code change. Nothing reads tilt_x/tilt_z back.
+//
+// Computed from the rotation matrix rather than from the Euler angles: pitch and
+// roll near zero and near +/-180 can describe the same physical rotation with a
+// compensating yaw, so a per-angle "distance from the expected flip" reports ~179
+// degrees for a perfectly ordinary solve.
+static Eigen::Matrix3d EulerDegToMatrix(const Eigen::Vector3d &eulerDeg)
+{
+	const Eigen::Vector3d r = eulerDeg * EIGEN_PI / 180.0;
+	return (Eigen::AngleAxisd(r(0), Eigen::Vector3d::UnitZ()) *
+		Eigen::AngleAxisd(r(1), Eigen::Vector3d::UnitY()) *
+		Eigen::AngleAxisd(r(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
+}
+
+// Signed, two-component. A magnitude (acos of an absolute cosine) is strictly
+// non-negative and therefore positively biased: fed pure zero-mean noise it
+// reports a healthy-looking average tilt forever and can never average to zero,
+// so it could never answer "is there a real tilt here" with no. Signed components
+// average to zero under noise and to the true tilt under a real one.
+static void SignedTiltDeg(const Eigen::Vector3d &eulerDeg, double &tiltX, double &tiltZ)
+{
+	Eigen::Vector3d v = EulerDegToMatrix(eulerDeg) * Eigen::Vector3d::UnitY();
+	if (v.y() < 0.0)
+		v = -v;
+
+	double z = v.z(), x = -v.x();
+	if (z > 1.0) z = 1.0; else if (z < -1.0) z = -1.0;
+	if (x > 1.0) x = 1.0; else if (x < -1.0) x = -1.0;
+
+	tiltX = std::asin(z) * 180.0 / EIGEN_PI;
+	tiltZ = std::asin(x) * 180.0 / EIGEN_PI;
+}
+
+// Resolve the log directory next to the driver's session logs, creating it if
+// needed. Returns false when LOCALAPPDATA is unusable, in which case the caller
+// writes nothing at all rather than half a record.
+static bool CalibrationLogDir(std::string &dir)
+{
+	char localAppData[MAX_PATH] = {};
+	DWORD n = GetEnvironmentVariableA("LOCALAPPDATA", localAppData, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return false;
+
+	const std::string root = std::string(localAppData) + "\\OpenVR-SpaceOverride";
+	CreateDirectoryA(root.c_str(), nullptr);
+	dir = root + "\\logs";
+	CreateDirectoryA(dir.c_str(), nullptr);
+	return true;
+}
+
+// Shared by the success and failure records: open for append and write the
+// timestamp prefix.
+static bool OpenCalibrationLog(std::ofstream &out)
+{
+	std::string dir;
+	if (!CalibrationLogDir(dir))
+		return false;
+
+	out.open(dir + "\\calibration.log", std::ios::app);
+	if (!out)
+		return false;
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+
+	out << std::fixed
+		<< st.wYear << "-" << std::setw(2) << std::setfill('0') << st.wMonth << "-"
+		<< std::setw(2) << std::setfill('0') << st.wDay << " "
+		<< std::setw(2) << std::setfill('0') << st.wHour << ":"
+		<< std::setw(2) << std::setfill('0') << st.wMinute << ":"
+		<< std::setw(2) << std::setfill('0') << st.wSecond << std::setfill(' ');
+	return true;
+}
+
+// Records a calibration that did NOT produce a profile.
+//
+// A log of successful solves only is exactly backwards: a user reporting
+// "calibration keeps failing" then produces a file containing nothing but clean
+// successes, and the runs worth a record are the ones that died. `accepted` is
+// passed in rather than read from a file static so this can be called from abort
+// paths that run before, during or after sampling.
+static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *result,
+	const char *reason, size_t accepted, int droppedTicks)
+{
+	std::ofstream out;
+	if (!OpenCalibrationLog(out))
+		return;
+
+	out << std::setprecision(3)
+		<< "  result=" << result
+		<< "  reason=" << reason
+		<< "  accepted=" << accepted
+		<< "  target=" << ctx.SampleCount()
+		<< "  speed=" << (int)ctx.calibrationSpeed
+		<< "  dropped=" << droppedTicks
+		// The scale and trim the run was ABOUT to modify, so an abort can be told
+		// apart from a run that never got far enough to threaten them.
+		<< std::setprecision(5)
+		<< "  hmdScale=" << ctx.hmdScale
+		<< "  trim=" << ctx.calibratedScale
+		<< "  hmd=" << ctx.hmdSerial
+		<< "  tracker=" << ctx.trackerSerial
+		<< "\n";
+}
+
+// Records a calibration that produced a profile.
+static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorMm,
+	size_t accepted, int droppedTicks)
+{
+	double tiltX = 0.0, tiltZ = 0.0;
+	SignedTiltDeg(ctx.calibratedRotation, tiltX, tiltZ);
+
+	std::ofstream out;
+	if (!OpenCalibrationLog(out))
+		return;
+
+	out << std::fixed
+		<< "  result=ok"
+		<< "  rms_mm=" << std::setprecision(1) << rmsErrorMm
+		<< "  accepted=" << accepted
+		<< "  target=" << ctx.SampleCount()
+		<< "  speed=" << (int)ctx.calibrationSpeed
+		<< "  dropped=" << droppedTicks
+		// Solved rotation as published, plus the pitch/roll tilt away from level.
+		// If tilt_* scatters run to run it is solver noise; if it repeats, it is a
+		// real tilt between the two spaces. This build applies it either way.
+		<< std::setprecision(2)
+		<< "  yaw=" << ctx.calibratedRotation(1)
+		<< "  pitch=" << ctx.calibratedRotation(2)
+		<< "  roll=" << ctx.calibratedRotation(0)
+		<< "  tilt_x=" << tiltX
+		<< "  tilt_z=" << tiltZ
+		// hmdScale is what ships; scale_raw is what this run fitted (including a
+		// fit that was rejected), and scale_src says which of upstream's four
+		// exits produced the shipped number.
+		<< std::setprecision(5)
+		<< "  hmdScale=" << ctx.hmdScale
+		<< "  scale_raw=" << g_lastScaleRaw
+		<< "  scale_src=" << g_lastScaleSource
+		<< "  spread_m=" << std::setprecision(3) << g_lastScaleSpread
+		<< std::setprecision(5)
+		<< "  trim=" << ctx.calibratedScale
+		<< "  targetModelScale=" << ctx.targetModelScale
+		// The head-tracker lever arm this run measured. Nothing averages it here,
+		// so raw is also what ships -- and its run-to-run scatter is the number
+		// that decides whether averaging would be worth having.
+		<< "  lever_raw_mm=" << std::setprecision(1)
+		<< ctx.relativeTranslation.v[0] * 1000.0 << "/"
+		<< ctx.relativeTranslation.v[1] * 1000.0 << "/"
+		<< ctx.relativeTranslation.v[2] * 1000.0
+		<< "  lever_valid=" << (ctx.validRelativeOffset ? 1 : 0)
+		<< "  hmd=" << ctx.hmdSerial
+		<< "  tracker=" << ctx.trackerSerial
+		<< "\n";
+}
 
 // ---------------------------------------------------------------------------
 // A13: desired driver state, written once instead of disable-then-enable.
@@ -172,6 +377,100 @@ struct DSample
 	bool valid;
 	Eigen::Vector3d ref, target;
 };
+
+// B3, second half: write the raw sample set to disk alongside the solve, one JSON object
+// per line.
+//
+// ACCEPTANCE (why the happy-path output is bit-identical): takes the sample vector by
+// const reference, writes a file, returns. It reads no solver state it can influence and
+// nothing in the overlay or driver reads a dump back.
+//
+// Why it exists: calibration.log records what a solve CONCLUDED, never what it was GIVEN,
+// so a change to the solver can be inspected but not measured -- and on a rig where the
+// felt difference between two solvers is a few millimetres, an unmeasurable change is
+// indistinguishable from run-to-run scatter. These dumps make a re-solve reproducible
+// offline: same input, N different estimators, compared against each other.
+//
+// Called BEFORE the sample set is rescaled by hmdScale, because the raw pairs are the
+// point. Bounded by SampleCount() -- at most 500 samples of ~160 bytes, so ~80 KB per
+// calibration -- which is why it needs no toggle.
+
+// 14-day sweep, matching the driver's session-log rule. One dump per completed solve is
+// small, but nothing else ever deletes them.
+static void PruneOldCalibrationDumps(const std::string &dir)
+{
+	const std::string pattern = dir + "\\calsamples_*.jsonl";
+
+	FILETIME ftNow;
+	GetSystemTimeAsFileTime(&ftNow);
+	ULARGE_INTEGER now;
+	now.LowPart = ftNow.dwLowDateTime;
+	now.HighPart = ftNow.dwHighDateTime;
+	const unsigned long long maxAge100ns = 14ULL * 24 * 60 * 60 * 10000000ULL;
+
+	WIN32_FIND_DATAA fd;
+	HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+	if (h == INVALID_HANDLE_VALUE)
+		return;
+	do
+	{
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			continue;
+		ULARGE_INTEGER wt;
+		wt.LowPart = fd.ftLastWriteTime.dwLowDateTime;
+		wt.HighPart = fd.ftLastWriteTime.dwHighDateTime;
+		if (now.QuadPart > wt.QuadPart && (now.QuadPart - wt.QuadPart) > maxAge100ns)
+			DeleteFileA((dir + "\\" + fd.cFileName).c_str());
+	} while (FindNextFileA(h, &fd));
+	FindClose(h);
+}
+
+static void DumpCalibrationSamples(const CalibrationContext &ctx,
+	const std::vector<Sample> &samples)
+{
+	std::string dir;
+	if (!CalibrationLogDir(dir))
+		return;
+
+	PruneOldCalibrationDumps(dir);
+
+	SYSTEMTIME st;
+	GetLocalTime(&st);
+	char stamp[32];
+	snprintf(stamp, sizeof stamp, "%04d%02d%02d_%02d%02d%02d",
+		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+
+	std::ofstream out(dir + "\\calsamples_" + stamp + ".jsonl");
+	if (!out)
+		return;
+
+	// Header line: everything a re-solve needs that is not per-sample.
+	out << std::fixed << std::setprecision(9)
+		<< "{\"type\":\"meta\",\"schema\":1"
+		<< ",\"hmd\":\"" << ctx.hmdSerial << "\""
+		<< ",\"tracker\":\"" << ctx.trackerSerial << "\""
+		<< ",\"speed\":" << (int)ctx.calibrationSpeed
+		<< ",\"samples\":" << samples.size()
+		<< ",\"targetModelScale\":" << ctx.targetModelScale
+		<< ",\"hmdScale\":" << ctx.hmdScale
+		<< ",\"scaleSrc\":\"" << g_lastScaleSource << "\""
+		<< "}\n";
+
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		// Quaternion rather than the 3x3: four numbers instead of nine, and unambiguous.
+		const Eigen::Quaterniond qr(samples[i].ref.rot);
+		const Eigen::Quaterniond qt(samples[i].target.rot);
+		out << "{\"i\":" << i
+			<< ",\"rp\":[" << samples[i].ref.trans.x() << "," << samples[i].ref.trans.y()
+			<< "," << samples[i].ref.trans.z() << "]"
+			<< ",\"rq\":[" << qr.w() << "," << qr.x() << "," << qr.y() << "," << qr.z() << "]"
+			<< ",\"tp\":[" << samples[i].target.trans.x() << "," << samples[i].target.trans.y()
+			<< "," << samples[i].target.trans.z() << "]"
+			<< ",\"tq\":[" << qt.w() << "," << qt.x() << "," << qt.y() << "," << qt.z() << "]"
+			<< "}\n";
+	}
+}
 
 bool StartsWith(const std::string &str, const std::string &prefix)
 {
@@ -445,6 +744,15 @@ Eigen::Vector3d CalibrateTranslation(const std::vector<Sample>& samples, const E
 
 static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Eigen::Matrix3d &rotation, double targetModelScale)
 {
+	// B3 assignment sites. Each exit below records which one it was, and (where a fit
+	// happened) what the fit produced, into the three write-only statics at the top of
+	// this file. Nothing in this function or any other reads them back -- they exist so
+	// calibration.log can distinguish a measured scale from one of upstream's three
+	// silent "assuming 1" branches, which the shipped number alone cannot show.
+	g_lastScaleSource = "unknown";
+	g_lastScaleRaw = -1.0;
+	g_lastScaleSpread = 0.0;
+
 	// DEGENERATE-INPUT GUARD (A14). Unreachable from the live path -- the finish gate
 	// cannot fire on an empty set -- so no happy-path solve changes. Without it the
 	// centroid divides by zero, spread is NaN, `spread < ScaleSpreadThreshold` is FALSE
@@ -452,6 +760,7 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	// answer both of upstream's own inconclusive branches already give.
 	if (samples.empty())
 	{
+		g_lastScaleSource = "no_samples";
 		CalCtx.Log("No samples to fit headset scale, assuming 1\n");
 		return 1.0;
 	}
@@ -465,10 +774,12 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	for (auto &sample : samples)
 		spread += (rotation * sample.target.trans - centroid).squaredNorm();
 	spread = std::sqrt(spread / (double)samples.size());
+	g_lastScaleSpread = spread;
 
 	char buf[256];
 	if (spread < ScaleSpreadThreshold)
 	{
+		g_lastScaleSource = "low_spread";
 		snprintf(buf, sizeof buf, "Not enough positional movement to estimate headset scale (spread %.2f m), assuming 1\n", spread);
 		CalCtx.Log(buf);
 		return 1.0;
@@ -490,14 +801,19 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 
 	Eigen::VectorXd result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
 	double fittedScale = result(0);
+	g_lastScaleRaw = fittedScale;
 
 	if (fittedScale < MinCalibratedScale || fittedScale > MaxCalibratedScale)
 	{
+		// The rejected value is kept in g_lastScaleRaw deliberately: "assuming 1" does
+		// not say how far off the solve was, and that distance is the diagnostic.
+		g_lastScaleSource = "implausible";
 		snprintf(buf, sizeof buf, "Fitted space scale %.5f is not plausible, assuming headset scale 1\n", fittedScale);
 		CalCtx.Log(buf);
 		return 1.0;
 	}
 
+	g_lastScaleSource = "measured";
 	snprintf(buf, sizeof buf, "Fitted headset space scale relative to lighthouse: %.5f (%+.2f%%), implied absolute headset scale: %.5f\n",
 		fittedScale, (fittedScale - 1.0) * 100.0, fittedScale / targetModelScale);
 	CalCtx.Log(buf);
@@ -1135,6 +1451,7 @@ void CalibrationTick(double time)
 			!ctx.devicePoses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid)
 		{
 			ctx.state = CalibrationState::None;
+			LogCalibrationOutcome(ctx, "abort", "no_tracking_hmd", 0, 0);
 			CalCtx.Log("No tracking HMD found, aborting calibration!\n");
 			return;
 		}
@@ -1155,6 +1472,7 @@ void CalibrationTick(double time)
 		if (Detection.candidates.empty())
 		{
 			ctx.state = CalibrationState::None;
+			LogCalibrationOutcome(ctx, "abort", "no_candidate_trackers", 0, 0);
 			CalCtx.Log("No trackers from a different tracking system detected, aborting!\n");
 			return;
 		}
@@ -1210,6 +1528,7 @@ void CalibrationTick(double time)
 		{
 			Detection.Clear();
 			ctx.state = CalibrationState::None;
+			LogCalibrationOutcome(ctx, "abort", "insufficient_head_motion", 0, 0);
 			CalCtx.Log("Didn't detect enough head movement, aborting! Try again and move your head more.\n");
 			return;
 		}
@@ -1235,6 +1554,7 @@ void CalibrationTick(double time)
 		{
 			Detection.Clear();
 			ctx.state = CalibrationState::None;
+			LogCalibrationOutcome(ctx, "abort", "tracker_id_ambiguous", 0, 0);
 			CalCtx.Log("Couldn't clearly identify the headset tracker, aborting! Make sure only the headset tracker moves with your head, then try again.\n");
 			return;
 		}
@@ -1264,6 +1584,7 @@ void CalibrationTick(double time)
 				"%s stopped tracking - aborting calibration. Previous calibration restored.\n",
 				g_lastCollectFailure ? g_lastCollectFailure : "A device");
 			ctx.Log(buf);
+			LogCalibrationOutcome(ctx, "abort", "tracking_lost", collectedSamples.size(), g_lossRunTicks);
 			AbortAndRestoreProfile(ctx);
 			return;
 		}
@@ -1297,6 +1618,7 @@ void CalibrationTick(double time)
 			if (++coplanarRetries >= 10)
 			{
 				CalCtx.Log("Not enough rotation variety after several attempts, aborting calibration! Previous calibration restored.\n");
+				LogCalibrationOutcome(ctx, "abort", "axis_variance", samples.size(), g_lossRunTicks);
 				AbortAndRestoreProfile(ctx);
 				return;
 			}
@@ -1323,6 +1645,19 @@ void CalibrationTick(double time)
 
 		ctx.hmdScale = EstimateHmdSpaceScale(samples, calRot, ctx.targetModelScale);
 
+		// B3. The count the rest of this solve actually ran on, taken before anything
+		// below can touch the vector -- the coplanar branch above erases a quarter of the
+		// set and returns, so samples.size() at the end of the run is not what the finish
+		// gate saw.
+		const size_t acceptedSamples = samples.size();
+
+		// B3. Written HERE, between the scale fit and the rescale below, because this is
+		// the last moment the pairs are raw: the loop that follows divides every reference
+		// translation by hmdScale in place, and a dump taken afterwards could not be
+		// re-solved with a different scale estimator. Reads the vector by const ref and
+		// writes a file; the solve continues on exactly the samples it would have had.
+		DumpCalibrationSamples(ctx, samples);
+
 		for (auto &sample : samples)
 			sample.ref.trans /= ctx.hmdScale;
 
@@ -1344,6 +1679,9 @@ void CalibrationTick(double time)
 		if (!(rmsError <= 0.1))
 		{
 			CalCtx.Log("Calibration quality is too low, aborting! Previous calibration restored. Try again with a slower calibration speed, moving smoothly.\n");
+			char reason[64];
+			snprintf(reason, sizeof reason, "rms_too_high(%.1fmm)", rmsError * 1000.0);
+			LogCalibrationOutcome(ctx, "abort", reason, acceptedSamples, g_lossRunTicks);
 			AbortAndRestoreProfile(ctx);
 			return;
 		}
@@ -1353,6 +1691,10 @@ void CalibrationTick(double time)
 		ctx.validProfile = true;
 		SaveProfile(ctx);
 		CalCtx.Log("Finished calibration, profile saved\n");
+
+		// B3. After SaveProfile, so the line records exactly what was persisted --
+		// rotation, scale, trim and lever arm are all final by here.
+		LogCalibrationResult(ctx, rmsError * 1000.0, acceptedSamples, g_lossRunTicks);
 
 		if (CalCtx.notificationId != 0) {
 			vr::VRNotifications()->RemoveNotification(CalCtx.notificationId);

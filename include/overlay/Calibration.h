@@ -103,7 +103,9 @@ struct CalibrationContext
 		continuousSync = true;
 	}
 
-	size_t SampleCount()
+	// const so the B3 log writers, which take a const CalibrationContext &, can read
+	// the run's sample target. Reads nothing but calibrationSpeed; no caller changes.
+	size_t SampleCount() const
 	{
 		switch (calibrationSpeed)
 		{
