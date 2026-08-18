@@ -75,6 +75,57 @@ inline vr::HmdQuaternion_t HmdQuaternion_FromMatrix(const T& matrix)
 	return q;
 }
 
+namespace {
+
+// ---- IPC input boundary ------------------------------------------------------------------
+// The pipe carries whatever a local process writes, the Request union is uninitialised
+// client-side, and the pipe has a default DACL. These setters wrote straight into the config a
+// pose callback reads.
+//
+// ACCEPTANCE (why the happy-path output is bit-identical): every predicate is phrased
+// POSITIVELY, so a good value passes it unchanged and nothing is clamped -- the whole message
+// is either applied exactly as sent or rejected whole. The live values sit far inside the
+// bounds (calibrationScale 0.99920, hmdScale 0.99200, translations ~1.5 m, unit quaternions),
+// so every message the shipped overlay sends is applied byte-for-byte as before.
+//
+// Policy is REJECT AND LOG, never silently clamp -- a clamped bad value produces mis-tracking
+// that looks like a calibration problem, which is the most expensive kind of bug this project
+// has. Note every test is written so NaN FAILS it: `>=`/`<=` are false for NaN, so the checks
+// are phrased positively rather than as negated bounds.
+
+inline bool FiniteQuatUnit(const vr::HmdQuaternion_t& q)
+{
+	if (!std::isfinite(q.w) || !std::isfinite(q.x) || !std::isfinite(q.y) || !std::isfinite(q.z))
+		return false;
+	const double n = sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+	return fabs(1.0 - n) <= 1e-3;
+}
+
+inline bool FiniteVecWithin(const vr::HmdVector3d_t& v, double maxAbs)
+{
+	if (!std::isfinite(v.v[0]) || !std::isfinite(v.v[1]) || !std::isfinite(v.v[2]))
+		return false;
+	return fabs(v.v[0]) <= maxAbs && fabs(v.v[1]) <= maxAbs && fabs(v.v[2]) <= maxAbs;
+}
+
+inline bool ScaleInRange(double s)
+{
+	return std::isfinite(s) && s >= 0.5 && s <= 2.0;
+}
+
+// One-Euro parameters. NaN previously survived `p.minCutoff < 0.01 ? 0.01 : p.minCutoff`
+// because the comparison is false for NaN, so the NaN was stored and propagated into alpha().
+// For any finite input this is `v < lo ? lo : v`, i.e. exactly what it replaces; the fallbacks
+// are oneeuro::Params' own member initialisers.
+inline double SanitizeOneEuro(double v, double lo, double fallback)
+{
+	if (!std::isfinite(v))
+		return fallback;
+	return v < lo ? lo : v;
+}
+
+} // namespace
+
 static double FilterStep(LARGE_INTEGER& lastUpdate, bool primed)
 {
 	LARGE_INTEGER now, freq;
@@ -167,6 +218,34 @@ void ServerTrackedDeviceProvider::Cleanup()
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform& newTransform)
 {
+	// The array-index bound upstream lacks entirely: openVRID comes off the pipe and indexes a
+	// fixed-size member array. SetSlamSync already had this check; SetDeviceTransform did not.
+	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount)
+	{
+		LOG("IPC REJECT SetDeviceTransform: openVRID %u out of range", newTransform.openVRID);
+		return;
+	}
+
+	// Validate before writing anything, and reject the whole message rather than applying the
+	// good fields of a bad one. tf.scale multiplies vecPosition for every device that carries a
+	// transform, so a NaN or zero here corrupts poses the driver does not otherwise touch.
+	if (newTransform.updateTranslation && !FiniteVecWithin(newTransform.translation, 10.0))
+	{
+		LOG("IPC REJECT SetDeviceTransform id=%u: translation not finite / >10 m", newTransform.openVRID);
+		return;
+	}
+	if (newTransform.updateRotation && !FiniteQuatUnit(newTransform.rotation))
+	{
+		LOG("IPC REJECT SetDeviceTransform id=%u: rotation not a finite unit quaternion", newTransform.openVRID);
+		return;
+	}
+	if (newTransform.updateScale && !ScaleInRange(newTransform.scale))
+	{
+		LOG("IPC REJECT SetDeviceTransform id=%u: scale %.6f outside [0.5, 2.0]",
+			newTransform.openVRID, newTransform.scale);
+		return;
+	}
+
 	auto& tf = transforms[newTransform.openVRID];
 	tf.enabled = newTransform.enabled;
 
@@ -182,6 +261,44 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 
 void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& cmd)
 {
+	// hmdID indexes transforms[] on the pose path via HandleDevicePoseUpdated's comparison, and
+	// trackerID indexes the raw pose array. Both come off the pipe unvalidated upstream.
+	if (cmd.hmdID >= vr::k_unMaxTrackedDeviceCount)
+	{
+		LOG("IPC REJECT SetHmdTracker: hmdID %u out of range", cmd.hmdID);
+		return;
+	}
+	if (cmd.enabled && cmd.trackerID >= vr::k_unMaxTrackedDeviceCount)
+	{
+		LOG("IPC REJECT SetHmdTracker: trackerID %u out of range", cmd.trackerID);
+		return;
+	}
+
+	// This message defines the entire calibration the pose path runs on. Reject it whole if any
+	// field is unusable — a partially-applied calibration is worse than none, because the driver
+	// keeps tracking and the error looks like a bad calibration rather than a bad message.
+	if (!FiniteQuatUnit(cmd.offsetRotation) || !FiniteQuatUnit(cmd.calibrationRotation))
+	{
+		LOG("IPC REJECT SetHmdTracker: offset/calibration rotation is not a finite unit quaternion");
+		return;
+	}
+	if (!FiniteVecWithin(cmd.offsetTranslation, 10.0) || !FiniteVecWithin(cmd.calibrationTranslation, 10.0))
+	{
+		LOG("IPC REJECT SetHmdTracker: offset/calibration translation not finite or >10 m");
+		return;
+	}
+	if (!ScaleInRange(cmd.calibrationScale) || !ScaleInRange(cmd.hmdScale))
+	{
+		LOG("IPC REJECT SetHmdTracker: calibrationScale %.6f / hmdScale %.6f outside [0.5, 2.0]",
+			cmd.calibrationScale, cmd.hmdScale);
+		return;
+	}
+	if (!std::isfinite(cmd.predictionTime))
+	{
+		LOG("IPC REJECT SetHmdTracker: predictionTime not finite");
+		return;
+	}
+
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -193,6 +310,8 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 	hmdTracker.offsetTranslation = cmd.offsetTranslation;
 	hmdTracker.calibrationRotation = cmd.calibrationRotation;
 	hmdTracker.calibrationTranslation = cmd.calibrationTranslation;
+	// Both are in range by ScaleInRange above; the ternaries are kept unchanged so the applied
+	// value is still explicit at the point of use, and so this line is textually upstream's.
 	hmdTracker.calibrationScale = cmd.calibrationScale > 0.0 ? cmd.calibrationScale : 1.0;
 	hmdTracker.hmdScale = cmd.hmdScale > 0.0 ? cmd.hmdScale : 1.0;
 
@@ -210,17 +329,25 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 
 void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 {
+	// Upstream already bounds this index; the only addition is that an out-of-range id is now
+	// logged instead of dropped in silence. Same policy as the other two setters.
 	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount)
 		slamSync[cmd.openVRID] = cmd.enabled;
+	else
+		LOG("IPC REJECT SetSlamSync: openVRID %u out of range", cmd.openVRID);
 }
 
 void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 {
+	// SanitizeOneEuro is `v < lo ? lo : v` for every finite input, so the parameters the overlay
+	// sends are stored unchanged. The only difference is that a non-finite value no longer
+	// slips through (`NaN < 0.01` is false, so upstream stored the NaN and alpha() spread it
+	// through the filtered pose).
 	auto toParams = [](const protocol::OneEuroParams& p) {
 		oneeuro::Params out;
-		out.minCutoff = p.minCutoff < 0.01 ? 0.01 : p.minCutoff;
-		out.beta = p.beta < 0.0 ? 0.0 : p.beta;
-		out.dCutoff = p.dCutoff < 0.01 ? 0.01 : p.dCutoff;
+		out.minCutoff = SanitizeOneEuro(p.minCutoff, 0.01, 1.0);
+		out.beta = SanitizeOneEuro(p.beta, 0.0, 0.0);
+		out.dCutoff = SanitizeOneEuro(p.dCutoff, 0.01, 1.0);
 		return out;
 	};
 
