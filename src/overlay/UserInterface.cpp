@@ -127,6 +127,22 @@ void UserInterface::Render(bool runningInOverlay)
 			else
 				ImGui::TextColored(ImColor(0.2f, 0.7f, 0.2f), "Override active: HMD driven by %s (%s)", tracker->serial.c_str(), tracker->trackingSystem.c_str());
 
+			// A11 HAZARD BANNER. ParseProfile now survives a truncated profile instead
+			// of throwing, so a profile can load with validProfile but no head/tracker
+			// offset. ScanAndApplyProfile then leaves the head override OFF while the
+			// body devices still get the calibration transform -- a half-applied
+			// calibration that reads as tracking drift. Persistent, not a transient log
+			// line, because the failure is silent from inside the headset.
+			if (CalCtx.validProfile && !CalCtx.validRelativeOffset)
+			{
+				ImGui::TextColored(ImColor(1.0f, 0.5f, 0.1f),
+					"WARNING: this profile has no head/tracker offset (rel_* keys missing).");
+				ImGui::TextColored(ImColor(1.0f, 0.5f, 0.1f),
+					"The head override stays OFF while your body devices are still being moved.");
+				ImGui::TextColored(ImColor(1.0f, 0.5f, 0.1f),
+					"Re-calibrate to fix this - saving now discards the partial offset for good.");
+			}
+
 			ImGui::Text("");
 
 			if (CalCtx.state == CalibrationState::None)
