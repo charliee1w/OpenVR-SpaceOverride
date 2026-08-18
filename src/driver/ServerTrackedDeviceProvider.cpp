@@ -121,6 +121,11 @@ void ServerTrackedDeviceProvider::Cleanup()
 	CloseLogFile();
 
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
+	// Poses in flight during teardown pass through untouched. Set before Stop()/DisableHooks()
+	// so a callback that is already inside the detour cannot start rewriting state the two
+	// calls below are dismantling. AUDIT 14 stays open: there is still no quiescence wait
+	// between this store and DisableHooks().
+	SetDriverShuttingDown(true);
 	server.Stop();
 	DisableHooks();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
