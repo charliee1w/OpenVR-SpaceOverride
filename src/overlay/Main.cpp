@@ -308,14 +308,12 @@ int main(int argc, char** argv)
                     */
                     break;
                 }
+                // ACCEPTANCE (A9): this changes *whether* the overlay keeps running,
+                // never what it computes. VREvent_Quit / DriverRequestedQuit /
+                // RestartRequested still take upstream's exit path verbatim, so a
+                // genuine SteamVR shutdown behaves exactly as before.
                 case vr::VREvent_Quit:
-                    [[fallthrough]];
-                case vr::VREvent_ProcessQuit:
-                    [[fallthrough]];
-                case vr::VREvent_QuitAcknowledged:
-                    [[fallthrough]];
                 case vr::VREvent_DriverRequestedQuit:
-                    [[fallthrough]];
                 case vr::VREvent_RestartRequested:
                 {
                     // CalCtx.Clear();
@@ -323,6 +321,14 @@ int main(int argc, char** argv)
                     g_ticking = false;
                     break;
                 }
+                // ProcessQuit / QuitAcknowledged fire when *other* OpenVR clients
+                // exit (tools, body drivers, another overlay). Upstream treated
+                // those as its own shutdown, so any unrelated app closing killed
+                // the overlay -- and the exit path then ran an unconditional
+                // SaveProfile. Do not treat someone else's exit as ours.
+                case vr::VREvent_ProcessQuit:
+                case vr::VREvent_QuitAcknowledged:
+                    break;
             }
         }
 
