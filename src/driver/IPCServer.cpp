@@ -35,6 +35,9 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 
 	default:
 		LOG("Invalid IPC request: %d", request.type);
+		// Answer an unknown request type explicitly instead of returning whatever `response`
+		// happened to hold. Unreachable for any request the shipped overlay sends.
+		response.type = protocol::ResponseInvalid;
 		break;
 	}
 }
@@ -46,17 +49,31 @@ IPCServer::~IPCServer()
 
 void IPCServer::Run()
 {
+	// Clear the latch before starting. Stop() sets `stop` and nothing else ever cleared it, so a
+	// same-process Cleanup->Init -- which this driver explicitly supports, and where member
+	// initialisers do NOT re-run -- restarted the thread with stop already true. RunThread's
+	// `while (!stop)` then exited on its first iteration, the pipe drained, and the overlay could
+	// never reconnect for the life of the process, with no error anywhere. InjectHooks was given
+	// the matching g_driverShuttingDown.store(false) reset for exactly this reason.
+	stop = false;
+	running = false;
 	mainThread = std::thread(RunThread, this);
 }
 
 void IPCServer::Stop()
 {
 	TRACE("IPCServer::Stop()");
-	if (!running)
+
+	// Join on joinable(), never on `running`. `running` is set by the thread itself, so testing
+	// it here raced the thread's own startup: a fast Init->Cleanup would see false, skip the
+	// join, and destroy a joinable std::thread -> std::terminate(). joinable() is a property of
+	// the handle this side owns, so it cannot race that way.
+	if (!mainThread.joinable())
 		return;
 
 	stop = true;
-	SetEvent(connectEvent);
+	if (HANDLE ev = connectEvent.load())
+		SetEvent(ev);
 	mainThread.join();
 	running = false;
 	TRACE("IPCServer::Stop() finished");
@@ -64,7 +81,10 @@ void IPCServer::Stop()
 
 IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 {
-	auto pipeInst = new PipeInstance;
+	// Value-initialised: OVERLAPPED is handed straight to ReadFileEx/WriteFileEx, and `request`
+	// is the buffer a short read would leave partly stale. `new PipeInstance` (no braces) left
+	// both indeterminate.
+	auto pipeInst = new PipeInstance{};
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
 	pipes.insert(pipeInst);
@@ -84,7 +104,8 @@ void IPCServer::RunThread(IPCServer *_this)
 	_this->running = true;
 	LPCTSTR pipeName = TEXT(OPENVR_SPACECALIBRATOR_PIPE_NAME);
 
-	HANDLE connectEvent = _this->connectEvent = CreateEvent(0, TRUE, TRUE, 0);
+	HANDLE connectEvent = CreateEvent(0, TRUE, TRUE, 0);
+	_this->connectEvent = connectEvent;
 	if (!connectEvent)
 	{
 		LOG("CreateEvent failed in RunThread. Error: %d", GetLastError());
@@ -137,11 +158,13 @@ void IPCServer::RunThread(IPCServer *_this)
 		}
 	}
 
-	for (auto &pipeInst : _this->pipes)
+	// ClosePipeInstance erases from `pipes`, which invalidates the iterator the
+	// range-for is holding; incrementing it afterwards walked a freed node. Drain
+	// the set instead so no iterator outlives the element it points at.
+	while (!_this->pipes.empty())
 	{
-		_this->ClosePipeInstance(pipeInst);
+		_this->ClosePipeInstance(*_this->pipes.begin());
 	}
-	_this->pipes.clear();
 }
 
 BOOL IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe)
@@ -187,7 +210,15 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	PipeInstance *pipeInst = (PipeInstance *) overlap;
 	BOOL success = FALSE;
 
-	if (err == 0 && bytesRead > 0)
+	// Length-checked, matching what CompletedWriteCallback already does for the response.
+	// ACCEPTANCE: src/overlay/IPCClient.cpp is unchanged from upstream and always writes exactly
+	// sizeof(protocol::Request) over a PIPE_TYPE_MESSAGE pipe, so for every message the shipped
+	// overlay sends `bytesRead == sizeof(Request)` is taken identically to `bytesRead > 0` --
+	// the happy path dispatches the same requests in the same order. A short message used to be
+	// dispatched anyway, so `request` was read past what the client actually wrote: stale bytes
+	// from the previous request on this pipe instance, or (before the value-init above)
+	// uninitialised heap.
+	if (err == 0 && bytesRead == sizeof protocol::Request)
 	{
 		pipeInst->server->HandleRequest(pipeInst->request, pipeInst->response);
 		success = WriteFileEx(
@@ -204,6 +235,11 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 		if (err == ERROR_BROKEN_PIPE)
 		{
 			LOG("IPC client disconnecting normally");
+		}
+		else if (err == 0 && bytesRead != sizeof protocol::Request)
+		{
+			LOG("IPC client sent a short/oversized request (%u bytes, expected %u) - dropping connection",
+				(unsigned)bytesRead, (unsigned)sizeof protocol::Request);
 		}
 		else
 		{
