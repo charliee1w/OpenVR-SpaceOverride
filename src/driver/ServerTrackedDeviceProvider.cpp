@@ -173,6 +173,10 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 	drift.lastUpdate = {};
 	drift.rotationFilter.reset();
 	drift.translationFilter.reset();
+	// The snapshot body devices read has to be cleared with it: on a same-process reload the
+	// pose threads would otherwise keep applying the pre-reload correction until the first HMD
+	// frame republishes.
+	sharedDrift = SharedDrift{};
 
 	headFilter.enabled = false;
 	headFilter.lastUpdate = {};
@@ -246,6 +250,9 @@ void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTr
 		return;
 	}
 
+	// Validation is done above, outside the lock; only the apply is exclusive.
+	std::unique_lock<std::shared_mutex> lock(configMutex);
+
 	auto& tf = transforms[newTransform.openVRID];
 	tf.enabled = newTransform.enabled;
 
@@ -299,6 +306,11 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		return;
 	}
 
+	// One exclusive section for the whole calibration. Upstream wrote these fifteen fields with
+	// no lock at all, so a pose callback reading them concurrently could compose a head pose
+	// from half of one calibration and half of the next.
+	std::unique_lock<std::shared_mutex> lock(configMutex);
+
 	hmdTracker.enabled = cmd.enabled;
 	hmdTracker.native = cmd.native;
 	hmdTracker.slamFallback = cmd.slamFallback;
@@ -324,6 +336,9 @@ void ServerTrackedDeviceProvider::SetHmdTracker(const protocol::SetHmdTracker& c
 		headVel.reset();
 		trackerFilter.reset();
 		memset(slamSync, 0, sizeof slamSync);
+		// Same clear, propagated to the copy the other pose threads read. Without this a body
+		// device could keep applying the correction from the calibration just torn down.
+		PublishDrift();
 	}
 }
 
@@ -332,7 +347,10 @@ void ServerTrackedDeviceProvider::SetSlamSync(const protocol::SetSlamSync& cmd)
 	// Upstream already bounds this index; the only addition is that an out-of-range id is now
 	// logged instead of dropped in silence. Same policy as the other two setters.
 	if (cmd.openVRID < vr::k_unMaxTrackedDeviceCount)
+	{
+		std::unique_lock<std::shared_mutex> lock(configMutex);
 		slamSync[cmd.openVRID] = cmd.enabled;
+	}
 	else
 		LOG("IPC REJECT SetSlamSync: openVRID %u out of range", cmd.openVRID);
 }
@@ -350,6 +368,8 @@ void ServerTrackedDeviceProvider::SetOneEuro(const protocol::SetOneEuro& cmd)
 		out.dCutoff = SanitizeOneEuro(p.dCutoff, 0.01, 1.0);
 		return out;
 	};
+
+	std::unique_lock<std::shared_mutex> lock(configMutex);
 
 	headFilter.rotationFilter.params = toParams(cmd.head);
 	headFilter.translationFilter.params = toParams(cmd.head);
@@ -402,8 +422,70 @@ void ServerTrackedDeviceProvider::ApplyDrift(vr::DriverPose_t& pose) const
 	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + drift.translation.v[2];
 }
 
+// Called at the end of the HMD branch, i.e. immediately after UpdateDrift on the same thread.
+// A body device whose pose lands between the two therefore sees the previous frame's
+// correction — at most one HMD frame of staleness, ~11 ms — where upstream saw a genuine torn
+// read of a quaternion being written concurrently.
+void ServerTrackedDeviceProvider::PublishDrift()
+{
+	std::lock_guard<std::mutex> lock(driftMutex);
+	sharedDrift.valid = drift.valid;
+	sharedDrift.rotation = drift.rotation;
+	sharedDrift.translation = drift.translation;
+}
+
+// The arithmetic below is ApplyDrift's, line for line, reading the published snapshot instead
+// of `drift`. It is deliberately duplicated rather than factored out so that ApplyDrift stays
+// textually upstream's for the static byte-compare. Returns false when no correction has been
+// published yet, which is upstream's `drift.valid` test moved inside.
+bool ServerTrackedDeviceProvider::ApplySharedDrift(vr::DriverPose_t& pose)
+{
+	vr::HmdQuaternion_t driftRotation;
+	vr::HmdVector3d_t driftTranslation;
+	{
+		std::lock_guard<std::mutex> lock(driftMutex);
+		if (!sharedDrift.valid)
+			return false;
+		driftRotation = sharedDrift.rotation;
+		driftTranslation = sharedDrift.translation;
+	}
+
+	double slamScale = SlamToCorrectedScale();
+
+	pose.qWorldFromDriverRotation = quaternionNormalize(driftRotation * pose.qWorldFromDriverRotation);
+
+	pose.vecPosition[0] *= slamScale;
+	pose.vecPosition[1] *= slamScale;
+	pose.vecPosition[2] *= slamScale;
+
+	double scaledTranslation[3] = {
+		pose.vecWorldFromDriverTranslation[0] * slamScale,
+		pose.vecWorldFromDriverTranslation[1] * slamScale,
+		pose.vecWorldFromDriverTranslation[2] * slamScale
+	};
+	vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(driftRotation, scaledTranslation);
+	pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + driftTranslation.v[0];
+	pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + driftTranslation.v[1];
+	pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + driftTranslation.v[2];
+	return true;
+}
+
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
+	// openVRID indexes transforms[] and slamSync[] directly. SteamVR only ever passes a valid
+	// index, so this is unreachable in play; it is here because the two arrays are fixed size.
+	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
+		return true;
+
+	// ACCEPTANCE (why the happy-path output is bit-identical): the arithmetic below is
+	// unchanged, and this lock is pure mutual exclusion — with no concurrent IPC write it
+	// admits exactly the frames upstream admitted, reading exactly the values upstream read.
+	// Held SHARED for the whole callback so a config write cannot tear an in-flight pose.
+	//
+	// Cannot self-deadlock on a writer-waiting shared_mutex: the detour's re-entrancy depth
+	// guard passes a re-entered pose callback straight through, before this lock is reached.
+	std::shared_lock<std::shared_mutex> configLock(configMutex);
+
 	auto& tf = transforms[openVRID];
 	if (tf.enabled && !hmdTracker.native)
 	{
@@ -616,10 +698,19 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					ApplyDrift(pose);
 				}
 			}
+
+			// Body devices (slamSync) read the correction through the snapshot, so publish it
+			// here, at the end of the HMD branch and on the same thread that just wrote it.
+			// Idempotent, and unconditional so that a frame which did NOT update the drift
+			// still keeps the snapshot in step with `drift.valid`.
+			PublishDrift();
 		}
-		else if (slamSync[openVRID] && drift.valid)
+		else if (slamSync[openVRID])
 		{
-			ApplyDrift(pose);
+			// ApplySharedDrift returns false and touches nothing when no correction has been
+			// published, so this is upstream's `slamSync[openVRID] && drift.valid` with the
+			// validity test moved inside the lock that protects the value it guards.
+			ApplySharedDrift(pose);
 		}
 	}
 

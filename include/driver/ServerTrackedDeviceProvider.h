@@ -8,6 +8,9 @@
 
 #include <openvr_driver.h>
 
+#include <mutex>
+#include <shared_mutex>
+
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
 public:
@@ -48,7 +51,15 @@ public:
 private:
 	void UpdateDrift(const vr::HmdQuaternion_t &correctedRotation, const double (&correctedPosition)[3],
 		const vr::HmdQuaternion_t &rawRotation, const double (&rawPosition)[3]);
+	// Reads `drift` directly. Only ever called from the HMD branch, i.e. the thread that owns
+	// `drift`; other pose threads go through ApplySharedDrift instead.
 	void ApplyDrift(vr::DriverPose_t &pose) const;
+
+	// Snapshot of the correction published for slamSync body devices, which are updated on
+	// other pose threads. The HMD path updates `drift` under the shared config lock and then
+	// PublishDrift copies it here under driftMutex.
+	void PublishDrift();
+	bool ApplySharedDrift(vr::DriverPose_t &pose);
 
 	double SlamToCorrectedScale() const
 	{
@@ -124,4 +135,23 @@ private:
 
 		void reset() { valid = false; filter.reset(); }
 	} headVel;
+
+	// Published correction for non-HMD slamSync devices. Written once per HMD frame by
+	// PublishDrift; read by every other pose thread under driftMutex, which is what removes
+	// the torn read of a quaternion being written concurrently.
+	struct SharedDrift
+	{
+		bool valid = false;
+		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
+		vr::HmdVector3d_t translation = { 0, 0, 0 };
+	} sharedDrift;
+
+	// Lock order: configMutex -> driftMutex. Never the reverse; nothing takes driftMutex first.
+	//
+	// configMutex is held SHARED for a whole pose callback and EXCLUSIVE in the IPC setters, so
+	// a config write cannot tear an in-flight pose: upstream applied SetHmdTracker field by
+	// field while a pose callback was part-way through reading them, which could compose a head
+	// pose from half of one calibration and half of another.
+	std::shared_mutex configMutex;
+	std::mutex driftMutex;
 };
