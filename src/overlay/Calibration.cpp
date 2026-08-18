@@ -1038,7 +1038,13 @@ static void PoolHmdScale(CalibrationContext &ctx, double fitted)
 		ctx.hmdScaleSamples++;
 
 	// This solve produced a measurement on the current headset: it owns the average from here.
-	ctx.hmdScaleSerial = ctx.hmdSerial;
+	// Only when the serial actually read, though. GetDeviceSerial discards its error and
+	// returns "" after a wake/re-enumerate (the V2 failure mode, fixed once already for the
+	// lever arm): storing "" as the owner permanently disarms the headset-changed reset in
+	// the guard above, because that guard requires BOTH serials non-empty to fire. An empty
+	// read keeps the previous owner; the average still updates.
+	if (!ctx.hmdSerial.empty())
+		ctx.hmdScaleSerial = ctx.hmdSerial;
 	ctx.hmdScale = merged;
 
 	char scaleBuf[256];
