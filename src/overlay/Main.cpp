@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <cmath>
 
 #include <imgui.h>
 #include <backends/imgui_impl_sdl3.h>
@@ -70,7 +71,18 @@ static auto UpdateApplicationRefreshRate() -> void
     try {
         auto hmd_properties = VrTrackedDeviceProperties::FromDeviceIndex(vr::k_unTrackedDeviceIndex_Hmd);
         hmd_properties.CheckConnection();
-        g_hmd_refresh_rate = hmd_properties.GetFloat(vr::Prop_DisplayFrequency_Float);
+        // ACCEPTANCE (A7): every real headset reports 72-144 Hz, which is inside
+        // [1, 1000], so the bound admits the same value upstream assigned and the
+        // frame pacer computes bit-identically. Only the failure case differs:
+        // GetFloat throws on a property error (already caught below), but a driver
+        // reporting success with 0 would give 1e9 / 0 = inf and then UB in the
+        // uint64_t cast that paces the loop, i.e. a hung overlay. On an implausible
+        // reading the last good rate is kept rather than the pacer being poisoned.
+        const float hz = hmd_properties.GetFloat(vr::Prop_DisplayFrequency_Float);
+        if (std::isfinite(hz) && hz >= 1.0f && hz <= 1000.0f)
+            g_hmd_refresh_rate = hz;
+        else
+            printf("Implausible display frequency %.3f reported; keeping %.1f Hz\n", hz, g_hmd_refresh_rate);
     }
     catch (std::exception& ex) {
         printf("%s\n\n", ex.what());
