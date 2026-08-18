@@ -61,6 +61,10 @@ private:
 	void PublishDrift();
 	bool ApplySharedDrift(vr::DriverPose_t &pose);
 
+	// Display refresh rate for the prediction interval, cached and floored. Upstream read the
+	// property inline on every HMD frame and divided by it unchecked.
+	double GetCachedDisplayHz(uint32_t hmdOpenVRID);
+
 	double SlamToCorrectedScale() const
 	{
 		double k = hmdTracker.hmdScale > 0.0 ? 1.0 / hmdTracker.hmdScale : 1.0;
@@ -145,6 +149,12 @@ private:
 		vr::HmdQuaternion_t rotation = { 1, 0, 0, 0 };
 		vr::HmdVector3d_t translation = { 0, 0, 0 };
 	} sharedDrift;
+
+	// Backing store for GetCachedDisplayHz. Written only from the HMD branch of the pose
+	// callback, i.e. by the same thread that reads it.
+	double cachedDisplayHz = 90.0;
+	LARGE_INTEGER displayHzLastQuery = {};
+	bool displayHzQueried = false;
 
 	// Lock order: configMutex -> driftMutex. Never the reverse; nothing takes driftMutex first.
 	//

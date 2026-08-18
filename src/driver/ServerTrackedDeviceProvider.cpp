@@ -188,6 +188,10 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext* pDriver
 
 	trackerFilter.reset();
 
+	displayHzQueried = false;
+	displayHzLastQuery = {};
+	cachedDisplayHz = 90.0;
+
 	drift.rotationFilter.params = { 3.0, 1.3, 0.6 };
 	drift.translationFilter.params = { 3.0, 1.3, 0.6 };
 	headFilter.rotationFilter.params = { 5.0, 0.8, 1.0 };
@@ -470,6 +474,45 @@ bool ServerTrackedDeviceProvider::ApplySharedDrift(vr::DriverPose_t& pose)
 	return true;
 }
 
+// ACCEPTANCE (why the happy-path output is bit-identical): every real headset reports a stable
+// 72-144 Hz, so the cached value is the same number the inline property read returned and the
+// prediction interval `(1.0 / hz) * predictionTime` is unchanged bit for bit -- the float the
+// property returns converts exactly to double, as it did before. What changes is only what
+// happens when the property read FAILS: upstream's GetFloatProperty returns 0.0f on error, so
+// (1.0/0)*predictionTime = inf (or NaN when predictionTime is 0, which it is on this rig) went
+// straight into GetRawTrackedDevicePoses. The floor also means a mid-session property failure
+// keeps the last good rate instead of poisoning the prediction.
+//
+// Re-read at most once a second. In vanilla-plus the only consumer is that prediction interval.
+double ServerTrackedDeviceProvider::GetCachedDisplayHz(uint32_t hmdOpenVRID)
+{
+	LARGE_INTEGER now{}, freq{};
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&freq);
+
+	bool need = !displayHzQueried;
+	if (displayHzQueried)
+	{
+		double elapsed = (now.QuadPart - displayHzLastQuery.QuadPart) / (double)freq.QuadPart;
+		if (elapsed >= 1.0)
+			need = true;
+	}
+
+	if (need && hmdOpenVRID < vr::k_unMaxTrackedDeviceCount)
+	{
+		vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(hmdOpenVRID);
+		double hz = vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float);
+		if (hz >= 1.0)
+			cachedDisplayHz = hz;
+		else if (!displayHzQueried)
+			cachedDisplayHz = 90.0;
+		displayHzLastQuery = now;
+		displayHzQueried = true;
+	}
+
+	return cachedDisplayHz > 1.0 ? cachedDisplayHz : 90.0;
+}
+
 bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t& pose)
 {
 	// openVRID indexes transforms[] and slamSync[] directly. SteamVR only ever passes a valid
@@ -524,10 +567,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				rawPosition[2] = world.v[2] + pose.vecWorldFromDriverTranslation[2];
 			}
 
-			vr::PropertyContainerHandle_t container = vr::VRProperties()->TrackedDeviceToPropertyContainer(openVRID);
+			// Same Hz on the happy path, so the same predSec. `container` went with the inline
+			// property read; GetCachedDisplayHz resolves its own.
+			double displayHz = GetCachedDisplayHz(openVRID);
 
 			vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / vr::VRProperties()->GetFloatProperty(container, vr::Prop_DisplayFrequency_Float)) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
+			vr::VRServerDriverHost()->GetRawTrackedDevicePoses((1.0 / displayHz) * hmdTracker.predictionTime, poses, vr::k_unMaxTrackedDeviceCount);
 
 			const auto& tp = poses[hmdTracker.trackerID];
 			if (tp.bPoseIsValid)
