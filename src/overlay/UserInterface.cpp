@@ -221,7 +221,19 @@ void UserInterface::Render(bool runningInOverlay)
 
 				ImGui::InputDouble("##Scale", &CalCtx.calibratedScale, 0.0001, 0.01, "%.8f");
 				ImGui::SameLine();
-				ImGui::InputDouble("##HmdScale", &CalCtx.hmdScale, 0.0001, 0.01, "%.8f");
+				// hmdScale stopped being a plain scalar in the 2026-08-15 build: it is the mean
+				// of a bounded pooling window with companion state hmdScaleSamples/hmdScaleSerial.
+				// Editing the mean while leaving n untouched contaminates the pool — at n=7 a
+				// hand correction is diluted 87.5% by the very next measured solve, and the next
+				// stepPct test runs against a typed value. (Observed live: 2026-08-16 23:38→23:41,
+				// hmdScale 0.99338→0.99098 with hmdscale_n frozen at 4 and no intervening solve —
+				// audit critic P2.) A manual edit now restarts the pool as a single observation
+				// the user asserts: the next solve blends 50/50 instead of 12.5%.
+				if (ImGui::InputDouble("##HmdScale", &CalCtx.hmdScale, 0.0001, 0.01, "%.8f"))
+				{
+					CalCtx.hmdScaleSamples = 1;
+					CalCtx.hmdScaleSerial = CalCtx.hmdSerial;
+				}
 				ImGui::PopItemWidth();
 
 				if (ImGui::Button("Save Profile", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetTextLineHeight() * 2)))

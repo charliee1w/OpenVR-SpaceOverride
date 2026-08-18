@@ -213,6 +213,9 @@ static void LogCalibrationOutcome(const CalibrationContext &ctx, const char *res
 		// a run that never got far enough to threaten them.
 		<< std::setprecision(5)
 		<< "  hmdScale=" << ctx.hmdScale
+		// The manual body-scale trim. Logged so the record shows it — its silent solve-time
+		// reset (A12) was invisible precisely because no line carried it.
+		<< "  trim=" << ctx.calibratedScale
 		<< "  hmdscale_n=" << ctx.hmdScaleSamples
 		<< "  hmd=" << ctx.hmdSerial
 		<< "  tracker=" << ctx.trackerSerial
@@ -235,6 +238,7 @@ static void LogCalibrationResult(const CalibrationContext &ctx, double rmsErrorM
 		<< "  spread_m=" << std::setprecision(3) << spreadM
 		<< "  spread_raw=" << g_lastFinishSpread
 		<< "  hmdScale=" << std::setprecision(5) << ctx.hmdScale
+		<< "  trim=" << ctx.calibratedScale
 		<< "  targetModelScale=" << ctx.targetModelScale
 		<< "  speed=" << (int)ctx.calibrationSpeed
 		// Distinguishes a well-covered calibration from a clumped one: accepted samples
@@ -795,13 +799,16 @@ static double EstimateHmdSpaceScale(const std::vector<Sample> &samples, const Ei
 	{
 		if (priorScale != 1.0)
 			snprintf(buf, sizeof buf,
-				"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m).\n"
+				// %.3f, not %.2f: a straddling run (raw spread passes the finish gate, collapsed
+				// spread fails this one — A11) rendered both numbers identically at two decimals,
+				// telling the user "spread 0.15 m, need >= 0.15 m".
+				"Not enough positional movement to measure headset scale (spread %.3f m, need >= %.3f m).\n"
 				"Keeping your previously measured headset scale %.5f (%+.2f%%). To re-measure it, walk and\n"
 				"crouch to cover more of your play space; head rotation alone cannot determine scale.\n",
 				spread, ScaleSpreadThreshold, priorScale, (priorScale - 1.0) * 100.0);
 		else
 			snprintf(buf, sizeof buf,
-				"Not enough positional movement to measure headset scale (spread %.2f m, need >= %.2f m), assuming 1.\n"
+				"Not enough positional movement to measure headset scale (spread %.3f m, need >= %.3f m), assuming 1.\n"
 				"Walk and crouch to cover more of your play space while calibrating; head rotation alone cannot determine scale.\n",
 				spread, ScaleSpreadThreshold);
 		CalCtx.Log(buf);
@@ -1577,6 +1584,19 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 				}
 			}
 		}
+
+		// Refresh targetModelScale from the live device. It is a pure function of the head
+		// tracker's model, but ParseProfile defaults it to 1.0 when the key is absent — and a
+		// profile written before the key existed (upstream, early fork, or a restored backup)
+		// then silently selects the wrong geometry at the deviceScale line below: model/1.0
+		// is the exact "absolute" regime the A-X1 revert disproved, shipping the Tundras 0.34%
+		// off against the head anchor with no log line. Recomputing here whenever the tracker
+		// is present makes the stored value self-healing regardless of profile vintage; the
+		// next SaveProfile persists the healed value. (2026-08-17 audit completeness critic P1
+		// — a cross-unit defect: the loader was sane in isolation, the divisor was sane given
+		// the value, and no per-unit audit owned the join.)
+		if (ctx.targetID != vr::k_unTrackedDeviceIndexInvalid)
+			ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
 	}
 
 	// Write the desired transform once per device. Do not disable-all then re-enable:
@@ -2453,11 +2473,20 @@ void CalibrationTick(double time)
 				"%s stopped tracking for %.1f s - aborting calibration. Previous calibration restored.\n",
 				g_lastCollectFailure ? g_lastCollectFailure : "A device", lostSec);
 			ctx.Log(buf);
-			LogCalibrationOutcome(ctx, "abort", "tracking_lost",
-				(int)collectedSamples.size(), g_stationCount, TargetSpread(collectedSamples),
-				SecondAxisVariance(collectedSamples), g_rejAngCount, g_rejLinCount,
-				g_lossTotalTicks);
+			// Log AFTER the restore, matching the rms_gate abort: hmdScale=/trim= on an abort
+			// line must mean "what the user is left running" on BOTH abort paths. This one
+			// logged pre-restore, so the same field meant two different things depending on
+			// the abort reason — which corrupted the log as an analysis input (the scale-pool
+			// replay script mis-read exactly these lines; audit critic P4/P5). Coverage
+			// fields are captured first, since the restore clears the sample set.
+			const int lossAccepted = (int)collectedSamples.size();
+			const int lossStations = g_stationCount;
+			const double lossSpread = TargetSpread(collectedSamples);
+			const double lossAxis = SecondAxisVariance(collectedSamples);
 			AbortAndRestoreProfile(ctx);
+			LogCalibrationOutcome(ctx, "abort", "tracking_lost",
+				lossAccepted, lossStations, lossSpread, lossAxis,
+				g_rejAngCount, g_rejLinCount, g_lossTotalTicks);
 			return;
 		}
 
@@ -2834,8 +2863,18 @@ void CalibrationTick(double time)
 			 Eigen::AngleAxisd(eulerRad(1), Eigen::Vector3d::UnitY()) *
 			 Eigen::AngleAxisd(eulerRad(2), Eigen::Vector3d::UnitX())).toRotationMatrix();
 
+		// calScale is the SOLVE's internal scale (always 1.0 — the fit does not estimate one).
+		// ctx.calibratedScale is a DIFFERENT quantity: the user's manual body-scale trim, set
+		// only in the UI. This line used to conflate them — `ctx.calibratedScale = calScale` —
+		// silently resetting the trim to 1.0 on every successful solve and persisting the reset
+		// via the SaveProfile below, with no log token and no message. The solve has no
+		// information about the trim (it fits rotation/translation), so it has no business
+		// writing it: the identical reasoning the hmdScale comment below applies to hmdScale
+		// ("keep the previously measured value rather than destroying it with a hard 1.0") and
+		// the same policy A3 applies to every other user-set field across an abort. The live
+		// profile's own timeline was the evidence: trim re-entered by hand after a solve wiped
+		// it, repeatedly. 2026-08-17 audit synthesis R1 / register A12.
 		double calScale = 1.0;
-		ctx.calibratedScale = calScale;
 		ctx.targetModelScale = GetLighthouseModelScale(ctx.targetID);
 
 		// Scale is the one calibrated quantity the runtime cannot re-estimate while playing

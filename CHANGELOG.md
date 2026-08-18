@@ -9,6 +9,53 @@ unreasonable precision from the person doing it.
 
 ---
 
+## The trim that kept vanishing, and what the completeness critic found (2026-08-17)
+
+The audit's final pass — full cross-verification plus a completeness critic asking what the
+fourteen per-unit audits structurally could not see. `protocol::Version` unchanged at 7.
+
+**Every successful solve silently reset the manual body-scale trim to 1.0.** `calScale` (the
+solve's internal scale, always 1.0 — the fit does not estimate one) was assigned into
+`ctx.calibratedScale` (the user's hand trim, set only in the UI), and `SaveProfile` persisted the
+wipe. No log line, no message; the trim simply reverted every calibration until the user noticed
+and re-typed it — which the profile's own timeline shows happening repeatedly. Three lines below,
+the `hmdScale` path argues the opposite policy in a comment ("keep the previously measured value
+rather than destroying it with a hard 1.0"); it was applied to one quantity and not its
+neighbour. The solve now leaves the trim alone, and `trim=` is logged on every calibration line
+so this class of reset can never be invisible again.
+
+**A profile's vintage silently selected between two body-geometry regimes.** `targetModelScale`
+defaulted to 1.0 when the key was absent — and the key is a fork addition, so any upstream,
+early-fork, or restored-backup profile computed `deviceScale = trim × model / 1.0`: the exact
+"absolute" regime the 08-16 revert disproved, shipping the Tundras 0.34% off with no log line.
+Cross-unit by construction — the loader was sane in isolation, the divisor was sane given the
+value, and no per-unit audit owned the join. The value is a pure function of the head tracker's
+model, so it is now refreshed from the live device on every scan; stale profiles self-heal on
+their next save.
+
+**Editing HMD Scale in the UI contaminated the pooled average.** `hmdScale` stopped being a plain
+scalar when pooling shipped (2026-08-15); the edit box kept writing the mean while leaving the
+sample count untouched, so at n=7 a hand correction was diluted 87.5% by the next measured solve
+— observed live in the log (0.99338 → 0.99098 with n frozen at 4). A manual edit now restarts
+the pool as a single asserted observation: the next solve blends 50/50.
+
+**An abort line's `hmdScale=` meant two different things.** The tracking-lost path logged before
+restoring the profile, the rms-gate path after — so the same field carried a pre-restore value on
+one path and a post-restore value on the other. Both now log after the restore: an abort line
+records what the user is left running.
+
+**The evidence pipeline itself had rotted.** The script behind the published "σ 0.757% → 0.068%,
+11.1×" pooling claim counted abort lines as calibrations and, since pooling shipped, read the
+pooled mean back as its own input — double-pooling. Corrected (skip aborts, read `hmdscale_raw=`),
+the claim reproduces at **σ 0.263% → 0.025%, 10.5×**: the conclusion stood, the number attached
+to it had drifted. The Aug 6–7 capture set the register cites as evidence was also copied out of
+the log directory before the 14-day retention sweep deletes it.
+
+Also: the low-spread message now prints at three decimals (a straddling run used to be told
+"spread 0.15 m, need >= 0.15 m").
+
+---
+
 ## Reference-frame breaks, stale driver state, and settings survival (2026-08-16)
 
 From a multi-agent audit of the tracking path plus a day of live sessions. `protocol::Version`
